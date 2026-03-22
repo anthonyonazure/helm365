@@ -126,6 +126,7 @@ export function CommandBar() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
+          data-command-input=""
           placeholder="Say it or type it — reset MFA, onboard a user, check compliance..."
           className="flex-1 bg-transparent text-sm placeholder:text-muted-foreground focus:outline-none"
         />
