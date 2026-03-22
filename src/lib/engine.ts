@@ -1,33 +1,15 @@
 import { route } from '@/agents/router';
+import { getAgentConfig } from '@/agents/registry';
 import { processRequest, markExecuted, markFailed, type GatewayRequest, type GatewayResult } from '@/gateway/gateway';
 import { createProvider, getModelForMode } from '@/providers';
 import { executeTool } from '@/tools/executor';
 import { useHelmStore } from './store';
 import { useTenantsStore } from './tenants-store';
 import type { Action } from '@/types/gateway';
-// GatewayTier comes from tool definitions, passed through to gateway
+import type { AIProvider, Message, ToolDefinition } from '@/types/providers';
+import type { AgentTool } from '@/agents/types';
 import type { TeamRole } from '@/gateway/permissions';
 import type { GraphCredentials } from './graph-client';
-import { USER_TOOLS } from '@/tools/graph/users';
-import { EXCHANGE_TOOLS } from '@/tools/graph/exchange';
-import { SECURITY_TOOLS } from '@/tools/graph/security';
-import { COMPLIANCE_TOOLS } from '@/tools/graph/compliance';
-import { LICENSING_TOOLS } from '@/tools/graph/licensing';
-import { DEVICE_TOOLS } from '@/tools/graph/devices';
-import { POLICY_TOOLS } from '@/tools/graph/policy';
-import { REPORTING_TOOLS } from '@/tools/graph/reporting';
-
-/**
- * Helm365 Engine — orchestrates the full command flow:
- *
- * 1. User speaks/types command
- * 2. Router classifies intent → picks agent
- * 3. Match to a registered tool
- * 4. Gateway checks permissions + generates preview
- * 5. Green: auto-execute. Yellow/Red: queue for approval.
- * 6. Execute tool calls against Graph API
- * 7. Log everything, return result
- */
 
 export interface CommandResult {
   success: boolean;
@@ -38,124 +20,6 @@ export interface CommandResult {
   error?: string;
 }
 
-// Tool registry — all tools across all agents
-const ALL_TOOLS = [
-  ...USER_TOOLS, ...EXCHANGE_TOOLS, ...SECURITY_TOOLS,
-  ...COMPLIANCE_TOOLS, ...LICENSING_TOOLS, ...DEVICE_TOOLS,
-  ...POLICY_TOOLS, ...REPORTING_TOOLS,
-];
-
-/**
- * Match parsed intent to a specific tool from the registry.
- */
-function matchTool(intent: string, agent: string, action?: string) {
-  const agentTools = ALL_TOOLS.filter((t) => t.agent === agent);
-
-  // Direct action mapping
-  const actionToolMap: Record<string, string> = {
-    reset_password: 'graph_reset_password',
-    reset_mfa: 'graph_reset_mfa',
-    unlock: 'graph_unlock_account',
-    unblock: 'graph_unlock_account',
-    create_user: 'graph_create_user',
-    disable: 'graph_disable_user',
-    delete_user: 'graph_delete_user',
-    assign_license: 'graph_assign_license',
-    remove_license: 'graph_remove_license',
-    add_group: 'graph_add_group_member',
-    remove_group: 'graph_remove_group_member',
-  };
-
-  if (action && actionToolMap[action]) {
-    const tool = agentTools.find((t) => t.name === actionToolMap[action]);
-    if (tool) return tool;
-  }
-
-  // Keyword matching in intent
-  const lower = intent.toLowerCase();
-
-  // Identity tools
-  if (lower.includes('reset') && lower.includes('mfa')) return agentTools.find((t) => t.name === 'graph_reset_mfa');
-  if (lower.includes('reset') && lower.includes('password')) return agentTools.find((t) => t.name === 'graph_reset_password');
-  if (lower.includes('unlock') || lower.includes('unblock')) return agentTools.find((t) => t.name === 'graph_unlock_account');
-  if (lower.includes('onboard') || lower.includes('create user') || lower.includes('new user') || lower.includes('new hire')) return agentTools.find((t) => t.name === 'graph_create_user');
-  if (lower.includes('offboard') || lower.includes('disable')) return agentTools.find((t) => t.name === 'graph_disable_user');
-  if (lower.includes('delete user') || lower.includes('remove user')) return agentTools.find((t) => t.name === 'graph_delete_user');
-  if (lower.includes('license') && lower.includes('assign')) return agentTools.find((t) => t.name === 'graph_assign_license');
-  if (lower.includes('group') && lower.includes('add')) return agentTools.find((t) => t.name === 'graph_add_group_member');
-  if (lower.includes('group') && lower.includes('remove')) return agentTools.find((t) => t.name === 'graph_remove_group_member');
-
-  // Exchange tools
-  if (lower.includes('block') && (lower.includes('sender') || lower.includes('spam'))) return agentTools.find((t) => t.name === 'exchange_block_sender');
-  if (lower.includes('allow') && (lower.includes('sender') || lower.includes('whitelist'))) return agentTools.find((t) => t.name === 'exchange_allow_sender');
-  if (lower.includes('quarantine') && lower.includes('release')) return agentTools.find((t) => t.name === 'graph_release_quarantine');
-  if (lower.includes('quarantine')) return agentTools.find((t) => t.name === 'graph_list_quarantine');
-  if (lower.includes('message trace') || lower.includes('trace')) return agentTools.find((t) => t.name === 'graph_message_trace');
-  if (lower.includes('forward') && lower.includes('email')) return agentTools.find((t) => t.name === 'graph_set_email_forwarding');
-  if (lower.includes('auto reply') || lower.includes('out of office') || lower.includes('ooo')) return agentTools.find((t) => t.name === 'graph_set_auto_reply');
-  if (lower.includes('shared mailbox')) return agentTools.find((t) => t.name === 'graph_create_shared_mailbox');
-  if (lower.includes('send as') || lower.includes('full access') || lower.includes('send on behalf') || lower.includes('mailbox') && lower.includes('access')) return agentTools.find((t) => t.name === 'graph_grant_mailbox_access');
-  if (lower.includes('mailbox')) return agentTools.find((t) => t.name === 'graph_list_mailboxes');
-
-  // Security tools
-  if (lower.includes('secure score')) return agentTools.find((t) => t.name === 'graph_get_secure_score');
-  if (lower.includes('risky user')) return agentTools.find((t) => t.name === 'graph_list_risky_users');
-  if (lower.includes('risky sign') || lower.includes('suspicious sign')) return agentTools.find((t) => t.name === 'graph_list_risky_signins');
-  if (lower.includes('security alert')) return agentTools.find((t) => t.name === 'graph_list_security_alerts');
-  if (lower.includes('sign-in log') || lower.includes('signin log') || lower.includes('login history')) return agentTools.find((t) => t.name === 'graph_get_sign_in_logs');
-  if (lower.includes('audit log') || lower.includes('who changed') || lower.includes('what happened')) return agentTools.find((t) => t.name === 'graph_get_audit_logs');
-  if (lower.includes('inbox rule')) return agentTools.find((t) => t.name === 'graph_check_inbox_rules');
-  if (lower.includes('app consent') || lower.includes('oauth')) return agentTools.find((t) => t.name === 'graph_list_app_consents');
-  if (lower.includes('investigate') || lower.includes('compromised')) return agentTools.find((t) => t.name === 'security_investigate_account');
-
-  // Compliance tools
-  if (lower.includes('cmmc') || lower.includes('nist') || lower.includes('cis') || lower.includes('hipaa') || lower.includes('soc2') || lower.includes('iso') || lower.includes('compliance') && lower.includes('assess')) return agentTools.find((t) => t.name === 'compliance_run_assessment');
-  if (lower.includes('conditional access') && lower.includes('list')) return agentTools.find((t) => t.name === 'graph_list_ca_policies');
-  if (lower.includes('conditional access') && (lower.includes('create') || lower.includes('add'))) return agentTools.find((t) => t.name === 'graph_create_ca_policy');
-  if (lower.includes('security default')) return agentTools.find((t) => t.name === 'graph_check_security_defaults');
-
-  // Licensing tools
-  if (lower.includes('license') && (lower.includes('audit') || lower.includes('waste') || lower.includes('unused') || lower.includes('optimize'))) return agentTools.find((t) => t.name === 'licensing_run_audit');
-  if (lower.includes('license') && (lower.includes('list') || lower.includes('inventory') || lower.includes('sku'))) return agentTools.find((t) => t.name === 'graph_list_subscribed_skus');
-  if (lower.includes('copilot') && lower.includes('readiness')) return agentTools.find((t) => t.name === 'graph_copilot_readiness');
-
-  // Device tools
-  if (lower.includes('noncompliant') || lower.includes('non-compliant')) return agentTools.find((t) => t.name === 'graph_list_noncompliant_devices');
-  if (lower.includes('wipe') && lower.includes('device')) return agentTools.find((t) => t.name === 'graph_wipe_device');
-  if (lower.includes('retire') && lower.includes('device')) return agentTools.find((t) => t.name === 'graph_retire_device');
-  if (lower.includes('sync') && lower.includes('device')) return agentTools.find((t) => t.name === 'graph_sync_device');
-  if (lower.includes('deploy') && lower.includes('app')) return agentTools.find((t) => t.name === 'graph_deploy_app');
-  if (lower.includes('remediation') && lower.includes('script')) return agentTools.find((t) => t.name === 'graph_run_remediation');
-  if (lower.includes('compliance polic')) return agentTools.find((t) => t.name === 'graph_list_compliance_policies');
-  if (lower.includes('config') && lower.includes('profile')) return agentTools.find((t) => t.name === 'graph_list_config_profiles');
-  if (lower.includes('device') || lower.includes('intune')) return agentTools.find((t) => t.name === 'graph_list_managed_devices');
-
-  // Policy tools
-  if (lower.includes('drift')) return agentTools.find((t) => t.name === 'policy_get_drift_status');
-  if (lower.includes('deploy') && (lower.includes('baseline') || lower.includes('template') || lower.includes('policy'))) return agentTools.find((t) => t.name === 'policy_deploy_template');
-  if (lower.includes('rollback') || lower.includes('restore')) return agentTools.find((t) => t.name === 'policy_rollback');
-  if (lower.includes('backup') && lower.includes('polic')) return agentTools.find((t) => t.name === 'policy_create_backup');
-  if (lower.includes('compare') && lower.includes('tenant')) return agentTools.find((t) => t.name === 'policy_compare_tenants');
-  if (lower.includes('template')) return agentTools.find((t) => t.name === 'policy_list_templates');
-  if (lower.includes('remediate') && lower.includes('drift')) return agentTools.find((t) => t.name === 'policy_remediate_drift');
-
-  // Reporting tools
-  if (lower.includes('report') && (lower.includes('executive') || lower.includes('client') || lower.includes('monthly'))) return agentTools.find((t) => t.name === 'report_executive_summary');
-  if (lower.includes('report') && lower.includes('license')) return agentTools.find((t) => t.name === 'report_license_usage');
-  if (lower.includes('report') && lower.includes('security')) return agentTools.find((t) => t.name === 'report_security_posture');
-  if (lower.includes('report') && lower.includes('compliance')) return agentTools.find((t) => t.name === 'report_compliance_status');
-  if (lower.includes('report') && (lower.includes('user') || lower.includes('activity') || lower.includes('inactive'))) return agentTools.find((t) => t.name === 'report_user_activity');
-  if (lower.includes('report') && (lower.includes('cross') || lower.includes('fleet') || lower.includes('all tenant'))) return agentTools.find((t) => t.name === 'report_cross_tenant');
-  if (lower.includes('report') && lower.includes('action')) return agentTools.find((t) => t.name === 'report_actions_summary');
-  if (lower.includes('report') || lower.includes('health summary')) return agentTools.find((t) => t.name === 'report_tenant_health');
-
-  // Search fallback
-  if (lower.includes('search') || lower.includes('find') || lower.includes('look up') || lower.includes('show me')) return agentTools.find((t) => t.name === 'graph_search_users');
-
-  // Default: first green tool for the agent
-  return agentTools.find((t) => t.tier === 'green') ?? agentTools[0];
-}
-
 /**
  * Get Graph API credentials for the active tenant.
  */
@@ -164,19 +28,65 @@ function getTenantCredentials(tenantConnectionId: string): GraphCredentials | nu
   return creds[tenantConnectionId] ?? null;
 }
 
+/**
+ * Convert AgentTools to the AI provider's ToolDefinition format.
+ */
+function toToolDefinitions(tools: AgentTool[]): ToolDefinition[] {
+  return tools.map((t) => ({
+    name: t.name,
+    description: t.description,
+    parameters: t.parameters,
+  }));
+}
+
+/**
+ * Invoke the specialist agent with AI — sends the system prompt + user message
+ * + available tools to the AI provider. The AI decides which tool to call and
+ * with what arguments.
+ */
+async function invokeAgent(
+  agentType: string,
+  userMessage: string,
+  aiProvider: AIProvider,
+  model: string,
+  tenantContext?: string,
+): Promise<{ content: string; toolCalls: Array<{ name: string; arguments: Record<string, unknown> }> }> {
+  const config = getAgentConfig(agentType as Parameters<typeof getAgentConfig>[0]);
+
+  const systemPrompt = tenantContext
+    ? `${config.systemPrompt}\n\nCURRENT CONTEXT:\n- Active tenant: ${tenantContext}\n- Processing mode: ${useHelmStore.getState().processingMode}`
+    : config.systemPrompt;
+
+  const messages: Message[] = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userMessage },
+  ];
+
+  const tools = toToolDefinitions(config.tools);
+  const response = await aiProvider.chat(messages, tools, model);
+
+  return {
+    content: response.content,
+    toolCalls: response.toolCalls.map((tc) => ({
+      name: tc.name,
+      arguments: tc.arguments,
+    })),
+  };
+}
+
 export async function executeCommand(input: string): Promise<CommandResult> {
   const store = useHelmStore.getState();
   const tenantsStore = useTenantsStore.getState();
 
-  // Create AI provider if configured (keyword routing works without one)
-  let provider = null;
+  // Create AI provider if configured
+  let aiProvider: AIProvider | null = null;
   let model: string | undefined;
 
   if (store.activeProvider) {
     const apiKey = store.providerKeys[store.activeProvider];
     if (apiKey || store.activeProvider === 'ollama') {
       try {
-        provider = createProvider(store.activeProvider, apiKey ?? '');
+        aiProvider = createProvider(store.activeProvider, apiKey ?? '');
         model = store.activeModel ?? getModelForMode(store.activeProvider, store.processingMode);
       } catch {
         // Fall through to keyword routing
@@ -185,33 +95,66 @@ export async function executeCommand(input: string): Promise<CommandResult> {
   }
 
   try {
-    // 1. Route — uses AI if available, keyword fallback otherwise
-    const parsed = await route(input, provider, model);
+    // 1. Route to specialist agent
+    const parsed = await route(input, aiProvider, model);
 
-    // 2. Match to a specific tool
-    const tool = matchTool(input, parsed.agent, parsed.entities.action);
-    // Tool tier is used by the gateway request through tool.tier
-
-    // 3. Resolve tenant
+    // 2. Resolve tenant context
     const activeTenant = store.activeTenantId
       ? tenantsStore.getConnection(store.activeTenantId)
       : null;
-
     const tenantName = parsed.entities.tenant ?? activeTenant?.tenantName ?? 'No tenant';
     const tenantDomain = activeTenant?.tenantDomain ?? 'demo.onmicrosoft.com';
+    const credentials = store.activeTenantId ? getTenantCredentials(store.activeTenantId) : null;
 
-    // 4. Build gateway request
+    // 3. Get agent config
+    const agentConfig = getAgentConfig(parsed.agent);
+
+    // 4. If AI provider is available, let the agent decide which tool to call
+    let selectedTool: AgentTool | undefined;
+    let toolArgs: Record<string, unknown> = parsed.entities as Record<string, unknown>;
+    let agentResponse = '';
+
+    if (aiProvider && model) {
+      try {
+        const result = await invokeAgent(
+          parsed.agent,
+          input,
+          aiProvider,
+          model,
+          activeTenant ? `${activeTenant.tenantName} (${activeTenant.tenantDomain})` : undefined,
+        );
+
+        agentResponse = result.content;
+
+        // AI chose a tool
+        if (result.toolCalls.length > 0) {
+          const firstCall = result.toolCalls[0]!;
+          selectedTool = agentConfig.tools.find((t) => t.name === firstCall.name);
+          toolArgs = firstCall.arguments;
+        }
+      } catch (err) {
+        // AI invocation failed — fall back to keyword matching
+        console.warn('[Engine] Agent invocation failed, falling back to keyword matching:', err);
+      }
+    }
+
+    // Fall back to keyword matching if AI didn't select a tool
+    if (!selectedTool) {
+      selectedTool = matchToolByKeyword(input, parsed.agent, parsed.entities.action);
+    }
+
+    // 5. Build gateway request
     const gatewayRequest: GatewayRequest = {
       intent: input,
       agent: parsed.agent,
-      tool: tool ?? {
+      tool: selectedTool ?? {
         name: `${parsed.agent}_query`,
         description: parsed.intent,
         parameters: { type: 'object', properties: {} },
         tier: 'green',
         agent: parsed.agent,
       },
-      arguments: parsed.entities as Record<string, unknown>,
+      arguments: toolArgs,
       tenantConnectionId: store.activeTenantId ?? 'demo',
       tenantName,
       tenantDomain,
@@ -225,10 +168,8 @@ export async function executeCommand(input: string): Promise<CommandResult> {
       aiTokensUsed: 0,
     };
 
-    // 5. Process through gateway
+    // 6. Process through gateway
     const gatewayResult: GatewayResult = processRequest(gatewayRequest);
-
-    // 6. Add to store
     store.addAction(gatewayResult.action);
 
     if (!gatewayResult.allowed) {
@@ -241,74 +182,126 @@ export async function executeCommand(input: string): Promise<CommandResult> {
     }
 
     if (gatewayResult.requiresApproval) {
+      const message = agentResponse
+        ? `${agentResponse}\n\nPending approval — check Operations Center.`
+        : `Pending approval: ${parsed.intent}. Check the Operations Center to approve.`;
+
       return {
         success: true,
-        message: `Pending approval: ${parsed.intent}. Check the Operations Center to approve.`,
+        message,
         action: gatewayResult.action,
         requiresApproval: true,
         agent: parsed.agent,
       };
     }
 
-    // 7. Auto-approved (GREEN tier) — execute for real if tenant is connected
-    const credentials = store.activeTenantId ? getTenantCredentials(store.activeTenantId) : null;
-
-    if (credentials && tool) {
-      // Real execution against Graph API
+    // 7. GREEN tier — execute
+    if (credentials && selectedTool) {
       const execResult = await executeTool({
-        toolName: tool.name,
-        arguments: parsed.entities as Record<string, unknown>,
+        toolName: selectedTool.name,
+        arguments: toolArgs,
         credentials,
       });
 
+      const summary = agentResponse
+        ? `${agentResponse}\n\n${execResult.summary}`
+        : execResult.summary;
+
       if (execResult.success) {
-        markExecuted(gatewayResult.action, execResult.summary, execResult.rollbackData);
+        markExecuted(gatewayResult.action, summary, execResult.rollbackData);
         store.updateAction(gatewayResult.action.id, {
           status: 'executed',
-          result: execResult.summary,
+          result: summary,
           rollbackData: execResult.rollbackData ?? null,
         });
-
-        return {
-          success: true,
-          message: execResult.summary,
-          action: gatewayResult.action,
-          agent: parsed.agent,
-        };
+        return { success: true, message: summary, action: gatewayResult.action, agent: parsed.agent };
       } else {
         markFailed(gatewayResult.action, execResult.error ?? 'Unknown error');
-        store.updateAction(gatewayResult.action.id, {
-          status: 'failed',
-          result: execResult.summary,
-        });
-
-        return {
-          success: false,
-          message: execResult.summary,
-          action: gatewayResult.action,
-          agent: parsed.agent,
-          error: execResult.error,
-        };
+        store.updateAction(gatewayResult.action.id, { status: 'failed', result: summary });
+        return { success: false, message: summary, action: gatewayResult.action, agent: parsed.agent, error: execResult.error };
       }
     }
 
-    // No tenant connected — simulate
-    const result = `[Demo] Routed to ${parsed.agent} agent → ${tool?.name ?? 'unknown tool'} (confidence: ${(parsed.confidence * 100).toFixed(0)}%). Connect a tenant to execute for real.`;
-    markExecuted(gatewayResult.action, result);
-    store.updateAction(gatewayResult.action.id, { status: 'executed', result });
+    // Demo mode — no tenant connected
+    const demoMsg = agentResponse
+      ? `${agentResponse}\n\n[Demo] Tool: ${selectedTool?.name ?? 'unknown'}. Connect a tenant to execute.`
+      : `[Demo] ${parsed.agent} agent → ${selectedTool?.name ?? 'unknown'} (${(parsed.confidence * 100).toFixed(0)}% confidence). Connect a tenant to execute.`;
 
-    return {
-      success: true,
-      message: result,
-      action: gatewayResult.action,
-      agent: parsed.agent,
-    };
+    markExecuted(gatewayResult.action, demoMsg);
+    store.updateAction(gatewayResult.action.id, { status: 'executed', result: demoMsg });
+    return { success: true, message: demoMsg, action: gatewayResult.action, agent: parsed.agent };
+
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
-    return {
-      success: false,
-      message: `Failed to process command: ${message}`,
-      error: message,
-    };
+    return { success: false, message: `Failed: ${message}`, error: message };
   }
+}
+
+// ─── Keyword fallback (no AI) ────────────────────────────────────────
+
+function matchToolByKeyword(intent: string, agent: string, action?: string): AgentTool | undefined {
+  const allTools = getAgentConfig(agent as Parameters<typeof getAgentConfig>[0]).tools;
+  const lower = intent.toLowerCase();
+
+  // Direct action map
+  const map: Record<string, string> = {
+    reset_password: 'graph_reset_password', reset_mfa: 'graph_reset_mfa',
+    unlock: 'graph_unlock_account', unblock: 'graph_unlock_account',
+    create_user: 'graph_create_user', disable: 'graph_disable_user',
+    delete_user: 'graph_delete_user', assign_license: 'graph_assign_license',
+  };
+  if (action && map[action]) {
+    const t = allTools.find((t) => t.name === map[action]);
+    if (t) return t;
+  }
+
+  // Keyword patterns — identity
+  if (lower.includes('reset') && lower.includes('mfa')) return allTools.find((t) => t.name === 'graph_reset_mfa');
+  if (lower.includes('reset') && lower.includes('password')) return allTools.find((t) => t.name === 'graph_reset_password');
+  if (lower.includes('unlock') || lower.includes('unblock')) return allTools.find((t) => t.name === 'graph_unlock_account');
+  if (lower.includes('onboard') || lower.includes('new hire')) return allTools.find((t) => t.name === 'graph_create_user');
+  if (lower.includes('offboard') || lower.includes('disable')) return allTools.find((t) => t.name === 'graph_disable_user');
+
+  // Exchange
+  if (lower.includes('block') && lower.includes('sender')) return allTools.find((t) => t.name === 'exchange_block_sender');
+  if (lower.includes('quarantine') && lower.includes('release')) return allTools.find((t) => t.name === 'graph_release_quarantine');
+  if (lower.includes('quarantine')) return allTools.find((t) => t.name === 'graph_list_quarantine');
+  if (lower.includes('message trace')) return allTools.find((t) => t.name === 'graph_message_trace');
+  if (lower.includes('forward') && lower.includes('email')) return allTools.find((t) => t.name === 'graph_set_email_forwarding');
+  if (lower.includes('shared mailbox')) return allTools.find((t) => t.name === 'graph_create_shared_mailbox');
+  if (lower.includes('spam')) return allTools.find((t) => t.name === 'exchange_block_sender');
+
+  // Security
+  if (lower.includes('secure score')) return allTools.find((t) => t.name === 'graph_get_secure_score');
+  if (lower.includes('investigate') || lower.includes('compromised')) return allTools.find((t) => t.name === 'security_investigate_account');
+  if (lower.includes('risky')) return allTools.find((t) => t.name === 'graph_list_risky_users');
+  if (lower.includes('audit log')) return allTools.find((t) => t.name === 'graph_get_audit_logs');
+
+  // Compliance
+  if (lower.includes('cmmc') || lower.includes('nist') || lower.includes('hipaa') || lower.includes('cis') || lower.includes('soc2')) return allTools.find((t) => t.name === 'compliance_run_assessment');
+  if (lower.includes('conditional access')) return allTools.find((t) => t.name === 'graph_list_ca_policies');
+
+  // Device
+  if (lower.includes('noncompliant') || lower.includes('non-compliant')) return allTools.find((t) => t.name === 'graph_list_noncompliant_devices');
+  if (lower.includes('wipe')) return allTools.find((t) => t.name === 'graph_wipe_device');
+  if (lower.includes('device') || lower.includes('intune')) return allTools.find((t) => t.name === 'graph_list_managed_devices');
+
+  // Licensing
+  if (lower.includes('license') && (lower.includes('audit') || lower.includes('waste'))) return allTools.find((t) => t.name === 'licensing_run_audit');
+  if (lower.includes('license')) return allTools.find((t) => t.name === 'graph_list_subscribed_skus');
+  if (lower.includes('copilot')) return allTools.find((t) => t.name === 'graph_copilot_readiness');
+
+  // Policy
+  if (lower.includes('drift')) return allTools.find((t) => t.name === 'policy_get_drift_status');
+  if (lower.includes('rollback')) return allTools.find((t) => t.name === 'policy_rollback');
+  if (lower.includes('deploy') && lower.includes('baseline')) return allTools.find((t) => t.name === 'policy_deploy_template');
+
+  // Reporting
+  if (lower.includes('report') && lower.includes('executive')) return allTools.find((t) => t.name === 'report_executive_summary');
+  if (lower.includes('report')) return allTools.find((t) => t.name === 'report_tenant_health');
+
+  // Search fallback
+  if (lower.includes('search') || lower.includes('find') || lower.includes('show')) return allTools.find((t) => t.name === 'graph_search_users');
+
+  return allTools.find((t) => t.tier === 'green') ?? allTools[0];
 }
