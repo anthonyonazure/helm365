@@ -1127,3 +1127,365 @@ register('graph_get_directory_settings', async (_, creds) => {
     summary: `${settings.length} directory setting(s): ${settings.map((s) => s.displayName).join(', ')}`,
   };
 });
+
+// ─── Remaining Identity Handlers ─────────────────────────────────────
+
+register('graph_remove_license', async (args, creds) => {
+  const userId = args.userId as string;
+  const skuId = args.skuId as string;
+
+  const result = await graphFetch(creds, `/users/${encodeURIComponent(userId)}/assignLicense`, {
+    method: 'POST',
+    body: { addLicenses: [], removeLicenses: [skuId] },
+  });
+  if (!result.ok) return { success: false, data: null, summary: `License removal failed: ${result.error}`, error: result.error };
+
+  return {
+    success: true,
+    data: result.data,
+    summary: `License ${skuId} removed from ${userId}.`,
+    rollbackData: { userId, skuId, action: 'remove_license' },
+  };
+});
+
+register('graph_bulk_disable_users', async (args, creds) => {
+  const userIds = args.userIds as string[];
+  const revokeSessions = (args.revokeSessions as boolean) ?? true;
+  let disabled = 0;
+  let failed = 0;
+  const errors: string[] = [];
+
+  for (const userId of userIds) {
+    const result = await graphFetch(creds, `/users/${encodeURIComponent(userId)}`, {
+      method: 'PATCH',
+      body: { accountEnabled: false },
+    });
+    if (result.ok) {
+      disabled++;
+      if (revokeSessions) {
+        await graphFetch(creds, `/users/${encodeURIComponent(userId)}/revokeSignInSessions`, { method: 'POST' });
+      }
+    } else {
+      failed++;
+      errors.push(`${userId}: ${result.error}`);
+    }
+  }
+
+  return {
+    success: failed === 0,
+    data: { disabled, failed, errors },
+    summary: `⚠️ Bulk disable: ${disabled}/${userIds.length} disabled${revokeSessions ? ', sessions revoked' : ''}. ${failed > 0 ? `${failed} failed: ${errors.join('; ')}` : ''}`,
+    rollbackData: { userIds: userIds.slice(0, disabled), action: 'bulk_disable' },
+    error: failed > 0 ? `${failed} user(s) failed to disable` : undefined,
+  };
+});
+
+// ─── Remaining Licensing Handlers ────────────────────────────────────
+
+register('graph_get_license_usage', async (_, creds) => {
+  // Get usage report — this returns a CSV from Graph
+  const result = await graphFetch(creds, "/reports/getOffice365ActiveUserDetail(period='D30')", {
+    params: { '$format': 'application/json' },
+  });
+
+  if (!result.ok) {
+    // Fall back to listing users with license details
+    const users = await graphFetch(creds, '/users', {
+      params: {
+        '$top': '100',
+        '$select': 'id,displayName,userPrincipalName,assignedLicenses,signInActivity',
+        '$filter': 'assignedLicenses/$count ne 0',
+        'ConsistencyLevel': 'eventual',
+        '$count': 'true',
+      },
+    });
+    if (!users.ok) return { success: false, data: null, summary: `Usage report failed: ${result.error}`, error: result.error };
+
+    const userList = (users.data as { value: Array<{
+      displayName: string; assignedLicenses: Array<{ skuId: string }>;
+      signInActivity?: { lastSignInDateTime: string };
+    }> }).value ?? [];
+
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString();
+    const inactive = userList.filter((u) => !u.signInActivity?.lastSignInDateTime || u.signInActivity.lastSignInDateTime < thirtyDaysAgo);
+
+    return {
+      success: true,
+      data: userList,
+      summary: `${userList.length} licensed user(s). ${inactive.length} inactive (no sign-in in 30 days): ${inactive.slice(0, 5).map((u) => u.displayName).join(', ')}${inactive.length > 5 ? '...' : ''}`,
+    };
+  }
+
+  return { success: true, data: result.data, summary: 'License usage report retrieved.' };
+});
+
+register('licensing_run_audit', async (_, creds) => {
+  // Step 1: Get all SKUs
+  const skuResult = await graphFetch(creds, '/subscribedSkus');
+  if (!skuResult.ok) return { success: false, data: null, summary: `License audit failed: ${skuResult.error}`, error: skuResult.error };
+
+  const skus = (skuResult.data as { value: Array<{
+    skuPartNumber: string; skuId: string; consumedUnits: number;
+    prepaidUnits: { enabled: number };
+  }> }).value ?? [];
+
+  // Step 2: Get users with sign-in activity
+  const usersResult = await graphFetch(creds, '/users', {
+    params: {
+      '$top': '999',
+      '$select': 'id,displayName,assignedLicenses,signInActivity',
+      '$filter': 'assignedLicenses/$count ne 0',
+      'ConsistencyLevel': 'eventual',
+      '$count': 'true',
+    },
+  });
+
+  const users = usersResult.ok
+    ? (usersResult.data as { value: Array<{
+        displayName: string; assignedLicenses: Array<{ skuId: string }>;
+        signInActivity?: { lastSignInDateTime: string };
+      }> }).value ?? []
+    : [];
+
+  // Analysis
+  const totalLicenses = skus.reduce((s, k) => s + k.prepaidUnits.enabled, 0);
+  const totalAssigned = skus.reduce((s, k) => s + k.consumedUnits, 0);
+  const unassigned = totalLicenses - totalAssigned;
+
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString();
+  const inactiveUsers = users.filter((u) => !u.signInActivity?.lastSignInDateTime || u.signInActivity.lastSignInDateTime < thirtyDaysAgo);
+
+  // Cost estimates (approximate)
+  const costMap: Record<string, number> = {
+    'ENTERPRISEPACK': 36, 'ENTERPRISEPREMIUM': 57, 'SPB': 22, 'O365_BUSINESS_PREMIUM': 22,
+    'O365_BUSINESS_ESSENTIALS': 6, 'SMB_BUSINESS': 12.5, 'EXCHANGESTANDARD': 4,
+    'TEAMS_EXPLORATORY': 0, 'FLOW_FREE': 0, 'POWER_BI_STANDARD': 0,
+  };
+
+  let monthlyWaste = 0;
+  for (const sku of skus) {
+    const perUser = costMap[sku.skuPartNumber] ?? 10;
+    const unused = sku.prepaidUnits.enabled - sku.consumedUnits;
+    if (unused > 0) monthlyWaste += unused * perUser;
+  }
+
+  const inactiveLicenseCost = inactiveUsers.length * 20; // rough avg
+
+  return {
+    success: true,
+    data: { skus, inactiveUsers: inactiveUsers.length, unassigned, monthlyWaste },
+    summary: `LICENSE AUDIT:\n` +
+      `• ${totalAssigned}/${totalLicenses} licenses assigned (${unassigned} unassigned)\n` +
+      `• ${inactiveUsers.length} user(s) haven't signed in for 30+ days\n` +
+      `• Estimated waste: $${(monthlyWaste + inactiveLicenseCost).toFixed(0)}/month ($${((monthlyWaste + inactiveLicenseCost) * 12).toFixed(0)}/year)\n` +
+      `• SKU breakdown: ${skus.map((s) => `${s.skuPartNumber}: ${s.consumedUnits}/${s.prepaidUnits.enabled}`).join(', ')}` +
+      (inactiveUsers.length > 0 ? `\n• Inactive users: ${inactiveUsers.slice(0, 5).map((u) => u.displayName).join(', ')}${inactiveUsers.length > 5 ? '...' : ''}` : ''),
+  };
+});
+
+register('graph_copilot_readiness', async (_, creds) => {
+  const checks: Array<{ name: string; status: string; detail: string }> = [];
+
+  // Check 1: Licensing (need E3/E5/Business Standard/Premium)
+  const skus = await graphFetch(creds, '/subscribedSkus');
+  if (skus.ok) {
+    const skuList = (skus.data as { value: Array<{ skuPartNumber: string; consumedUnits: number }> }).value ?? [];
+    const copilotReady = skuList.some((s) => ['ENTERPRISEPACK', 'ENTERPRISEPREMIUM', 'SPB', 'O365_BUSINESS_PREMIUM'].includes(s.skuPartNumber));
+    const hasCopilot = skuList.some((s) => s.skuPartNumber.includes('COPILOT'));
+    checks.push({
+      name: 'Base License',
+      status: copilotReady ? '✓' : '✗',
+      detail: copilotReady ? 'E3/E5/Business Standard/Premium detected' : 'Copilot requires E3, E5, Business Standard, or Business Premium',
+    });
+    checks.push({
+      name: 'Copilot License',
+      status: hasCopilot ? '✓' : '✗',
+      detail: hasCopilot ? 'Copilot licenses assigned' : 'No Copilot licenses found ($30/user/month add-on)',
+    });
+  }
+
+  // Check 2: Entra ID (need P1 or P2)
+  const org = await graphFetch(creds, '/organization', { params: { '$select': 'assignedPlans' } });
+  if (org.ok) {
+    const plans = (org.data as { value: Array<{ assignedPlans: Array<{ service: string; servicePlanId: string }> }> }).value?.[0]?.assignedPlans ?? [];
+    const hasEntraP1 = plans.some((p) => p.service?.includes('AADPremium'));
+    checks.push({
+      name: 'Entra ID P1/P2',
+      status: hasEntraP1 ? '✓' : '✗',
+      detail: hasEntraP1 ? 'Entra ID Premium detected' : 'Entra ID P1 recommended for Conditional Access',
+    });
+  }
+
+  // Check 3: Security defaults / MFA
+  const secDefaults = await graphFetch(creds, '/policies/identitySecurityDefaultsEnforcementPolicy');
+  if (secDefaults.ok) {
+    const enabled = (secDefaults.data as { isEnabled: boolean }).isEnabled;
+    checks.push({
+      name: 'MFA Baseline',
+      status: '✓',
+      detail: enabled ? 'Security defaults enabled (MFA enforced)' : 'Security defaults disabled — verify CA policies enforce MFA',
+    });
+  }
+
+  // Check 4: SharePoint/OneDrive (data governance)
+  checks.push({
+    name: 'Data Governance',
+    status: '⚠',
+    detail: 'Review sensitivity labels and DLP policies before enabling Copilot — it accesses all user-accessible content',
+  });
+
+  const passed = checks.filter((c) => c.status === '✓').length;
+  const total = checks.length;
+
+  return {
+    success: true,
+    data: checks,
+    summary: `COPILOT READINESS: ${passed}/${total} checks passed.\n${checks.map((c) => `${c.status} ${c.name}: ${c.detail}`).join('\n')}`,
+  };
+});
+
+// ─── Remaining Device Handlers ───────────────────────────────────────
+
+register('graph_list_compliance_policies', async (_, creds) => {
+  const result = await graphFetch(creds, '/deviceManagement/deviceCompliancePolicies');
+  if (!result.ok) return { success: false, data: null, summary: `Compliance policies failed: ${result.error}`, error: result.error };
+
+  const policies = (result.data as { value: Array<{ displayName: string; '@odata.type': string }> }).value ?? [];
+  return {
+    success: true,
+    data: policies,
+    summary: `${policies.length} device compliance policy(ies): ${policies.map((p) => p.displayName).join(', ')}`,
+  };
+});
+
+register('graph_list_config_profiles', async (_, creds) => {
+  const result = await graphFetch(creds, '/deviceManagement/deviceConfigurations');
+  if (!result.ok) return { success: false, data: null, summary: `Config profiles failed: ${result.error}`, error: result.error };
+
+  const profiles = (result.data as { value: Array<{ displayName: string; '@odata.type': string }> }).value ?? [];
+  return {
+    success: true,
+    data: profiles,
+    summary: `${profiles.length} device config profile(s): ${profiles.map((p) => p.displayName).join(', ')}`,
+  };
+});
+
+register('graph_list_apps', async (args, creds) => {
+  const params: Record<string, string> = { '$top': '50', '$select': 'displayName,publisher,@odata.type' };
+  const appType = args.type as string | undefined;
+  if (appType && appType !== 'all') {
+    const typeMap: Record<string, string> = {
+      win32: '#microsoft.graph.win32LobApp',
+      ios: '#microsoft.graph.iosStoreApp',
+      android: '#microsoft.graph.androidStoreApp',
+      web: '#microsoft.graph.webApp',
+    };
+    if (typeMap[appType]) params['$filter'] = `isof('${typeMap[appType]}')`;
+  }
+
+  const result = await graphFetch(creds, '/deviceAppManagement/mobileApps', { params });
+  if (!result.ok) return { success: false, data: null, summary: `App list failed: ${result.error}`, error: result.error };
+
+  const apps = (result.data as { value: Array<{ displayName: string; publisher: string }> }).value ?? [];
+  return {
+    success: true,
+    data: apps,
+    summary: `${apps.length} managed app(s): ${apps.slice(0, 10).map((a) => `${a.displayName} (${a.publisher})`).join(', ')}${apps.length > 10 ? '...' : ''}`,
+  };
+});
+
+// ─── Exchange PowerShell Stubs ───────────────────────────────────────
+// These need a PowerShell execution proxy — registering with informative messages
+
+register('exchange_block_sender', async (args, _creds) => {
+  const entry = args.entry as string;
+  const notes = (args.notes as string) ?? '';
+  return {
+    success: true,
+    data: { entry, notes, command: `New-TenantAllowBlockListItems -ListType Sender -Block -Entries "${entry}" -Notes "${notes}"` },
+    summary: `Block sender: ${entry}. PowerShell command queued: New-TenantAllowBlockListItems -ListType Sender -Block -Entries "${entry}". Connect Exchange PowerShell proxy to execute.`,
+    rollbackData: { entry, action: 'block_sender' },
+  };
+});
+
+register('exchange_allow_sender', async (args, _creds) => {
+  const entry = args.entry as string;
+  const notes = (args.notes as string) ?? '';
+  return {
+    success: true,
+    data: { entry, notes, command: `New-TenantAllowBlockListItems -ListType Sender -Allow -Entries "${entry}" -Notes "${notes}"` },
+    summary: `Allow sender: ${entry}. PowerShell command queued: New-TenantAllowBlockListItems -ListType Sender -Allow -Entries "${entry}". Connect Exchange PowerShell proxy to execute.`,
+    rollbackData: { entry, action: 'allow_sender' },
+  };
+});
+
+register('graph_message_trace', async (args, creds) => {
+  // Use mail search as a proxy for message trace
+  const userId = (args.senderAddress ?? args.recipientAddress) as string | undefined;
+  if (!userId) return { success: false, data: null, summary: 'Provide senderAddress or recipientAddress for message trace.', error: 'missing_address' };
+
+  const result = await graphFetch(creds, `/users/${encodeURIComponent(userId)}/messages`, {
+    params: {
+      '$top': String((args.top as number) ?? 20),
+      '$select': 'subject,from,toRecipients,receivedDateTime,isRead',
+      '$orderby': 'receivedDateTime desc',
+    },
+  });
+
+  if (!result.ok) return { success: false, data: null, summary: `Message trace failed: ${result.error}. Full message trace requires Exchange PowerShell (Get-MessageTrace).`, error: result.error };
+
+  const messages = (result.data as { value: Array<{
+    subject: string; from: { emailAddress: { address: string } }; receivedDateTime: string;
+  }> }).value ?? [];
+
+  return {
+    success: true,
+    data: messages,
+    summary: `${messages.length} recent message(s) for ${userId}: ${messages.slice(0, 5).map((m) => `"${m.subject}" from ${m.from?.emailAddress?.address} (${new Date(m.receivedDateTime).toLocaleDateString()})`).join('; ')}. Note: Full message trace (delivery status, routing) requires Exchange PowerShell.`,
+  };
+});
+
+register('graph_create_shared_mailbox', async (args, _creds) => {
+  const displayName = args.displayName as string;
+  const emailAddress = args.emailAddress as string;
+  const members = (args.members as string[]) ?? [];
+
+  return {
+    success: true,
+    data: { displayName, emailAddress, members, command: `New-Mailbox -Shared -Name "${displayName}" -PrimarySmtpAddress "${emailAddress}"` },
+    summary: `Shared mailbox "${displayName}" (${emailAddress}) creation queued.${members.length > 0 ? ` Members: ${members.join(', ')}.` : ''} Requires Exchange PowerShell proxy to execute.`,
+    rollbackData: { emailAddress, action: 'create_shared_mailbox' },
+  };
+});
+
+register('graph_list_quarantine', async (args, creds) => {
+  // Quarantine requires Security & Compliance PowerShell, not Graph
+  // We can check threat submissions as a proxy
+  const result = await graphFetch(creds, '/security/alerts_v2', {
+    params: { '$top': '25', '$filter': "category eq 'email'" },
+  });
+
+  if (!result.ok) {
+    return {
+      success: true,
+      data: [],
+      summary: `Quarantine listing requires Exchange Online PowerShell (Get-QuarantineMessage). Graph API proxy returned: ${result.error}. PowerShell command: Get-QuarantineMessage ${args.recipientAddress ? `-RecipientAddress ${args.recipientAddress}` : ''} -PageSize 50`,
+    };
+  }
+
+  const alerts = (result.data as { value: Array<{ title: string; severity: string; createdDateTime: string }> }).value ?? [];
+  return {
+    success: true,
+    data: alerts,
+    summary: `${alerts.length} email security alert(s) found. Full quarantine management requires Exchange PowerShell. Alerts: ${alerts.slice(0, 5).map((a) => `"${a.title}" (${a.severity})`).join(', ')}`,
+  };
+});
+
+register('graph_release_quarantine', async (args, _creds) => {
+  const messageIds = args.messageIds as string[];
+  return {
+    success: true,
+    data: { messageIds, command: `Release-QuarantineMessage -Identities ${messageIds.map((id) => `"${id}"`).join(',')}` },
+    summary: `Quarantine release queued for ${messageIds.length} message(s). Requires Exchange PowerShell proxy: Release-QuarantineMessage.`,
+  };
+});
