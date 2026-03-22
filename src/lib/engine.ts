@@ -13,6 +13,9 @@ import { EXCHANGE_TOOLS } from '@/tools/graph/exchange';
 import { SECURITY_TOOLS } from '@/tools/graph/security';
 import { COMPLIANCE_TOOLS } from '@/tools/graph/compliance';
 import { LICENSING_TOOLS } from '@/tools/graph/licensing';
+import { DEVICE_TOOLS } from '@/tools/graph/devices';
+import { POLICY_TOOLS } from '@/tools/graph/policy';
+import { REPORTING_TOOLS } from '@/tools/graph/reporting';
 
 /**
  * Helm365 Engine — orchestrates the full command flow:
@@ -36,7 +39,11 @@ export interface CommandResult {
 }
 
 // Tool registry — all tools across all agents
-const ALL_TOOLS = [...USER_TOOLS, ...EXCHANGE_TOOLS, ...SECURITY_TOOLS, ...COMPLIANCE_TOOLS, ...LICENSING_TOOLS];
+const ALL_TOOLS = [
+  ...USER_TOOLS, ...EXCHANGE_TOOLS, ...SECURITY_TOOLS,
+  ...COMPLIANCE_TOOLS, ...LICENSING_TOOLS, ...DEVICE_TOOLS,
+  ...POLICY_TOOLS, ...REPORTING_TOOLS,
+];
 
 /**
  * Match parsed intent to a specific tool from the registry.
@@ -111,6 +118,36 @@ function matchTool(intent: string, agent: string, action?: string) {
   if (lower.includes('license') && (lower.includes('audit') || lower.includes('waste') || lower.includes('unused') || lower.includes('optimize'))) return agentTools.find((t) => t.name === 'licensing_run_audit');
   if (lower.includes('license') && (lower.includes('list') || lower.includes('inventory') || lower.includes('sku'))) return agentTools.find((t) => t.name === 'graph_list_subscribed_skus');
   if (lower.includes('copilot') && lower.includes('readiness')) return agentTools.find((t) => t.name === 'graph_copilot_readiness');
+
+  // Device tools
+  if (lower.includes('noncompliant') || lower.includes('non-compliant')) return agentTools.find((t) => t.name === 'graph_list_noncompliant_devices');
+  if (lower.includes('wipe') && lower.includes('device')) return agentTools.find((t) => t.name === 'graph_wipe_device');
+  if (lower.includes('retire') && lower.includes('device')) return agentTools.find((t) => t.name === 'graph_retire_device');
+  if (lower.includes('sync') && lower.includes('device')) return agentTools.find((t) => t.name === 'graph_sync_device');
+  if (lower.includes('deploy') && lower.includes('app')) return agentTools.find((t) => t.name === 'graph_deploy_app');
+  if (lower.includes('remediation') && lower.includes('script')) return agentTools.find((t) => t.name === 'graph_run_remediation');
+  if (lower.includes('compliance polic')) return agentTools.find((t) => t.name === 'graph_list_compliance_policies');
+  if (lower.includes('config') && lower.includes('profile')) return agentTools.find((t) => t.name === 'graph_list_config_profiles');
+  if (lower.includes('device') || lower.includes('intune')) return agentTools.find((t) => t.name === 'graph_list_managed_devices');
+
+  // Policy tools
+  if (lower.includes('drift')) return agentTools.find((t) => t.name === 'policy_get_drift_status');
+  if (lower.includes('deploy') && (lower.includes('baseline') || lower.includes('template') || lower.includes('policy'))) return agentTools.find((t) => t.name === 'policy_deploy_template');
+  if (lower.includes('rollback') || lower.includes('restore')) return agentTools.find((t) => t.name === 'policy_rollback');
+  if (lower.includes('backup') && lower.includes('polic')) return agentTools.find((t) => t.name === 'policy_create_backup');
+  if (lower.includes('compare') && lower.includes('tenant')) return agentTools.find((t) => t.name === 'policy_compare_tenants');
+  if (lower.includes('template')) return agentTools.find((t) => t.name === 'policy_list_templates');
+  if (lower.includes('remediate') && lower.includes('drift')) return agentTools.find((t) => t.name === 'policy_remediate_drift');
+
+  // Reporting tools
+  if (lower.includes('report') && (lower.includes('executive') || lower.includes('client') || lower.includes('monthly'))) return agentTools.find((t) => t.name === 'report_executive_summary');
+  if (lower.includes('report') && lower.includes('license')) return agentTools.find((t) => t.name === 'report_license_usage');
+  if (lower.includes('report') && lower.includes('security')) return agentTools.find((t) => t.name === 'report_security_posture');
+  if (lower.includes('report') && lower.includes('compliance')) return agentTools.find((t) => t.name === 'report_compliance_status');
+  if (lower.includes('report') && (lower.includes('user') || lower.includes('activity') || lower.includes('inactive'))) return agentTools.find((t) => t.name === 'report_user_activity');
+  if (lower.includes('report') && (lower.includes('cross') || lower.includes('fleet') || lower.includes('all tenant'))) return agentTools.find((t) => t.name === 'report_cross_tenant');
+  if (lower.includes('report') && lower.includes('action')) return agentTools.find((t) => t.name === 'report_actions_summary');
+  if (lower.includes('report') || lower.includes('health summary')) return agentTools.find((t) => t.name === 'report_tenant_health');
 
   // Search fallback
   if (lower.includes('search') || lower.includes('find') || lower.includes('look up') || lower.includes('show me')) return agentTools.find((t) => t.name === 'graph_search_users');
