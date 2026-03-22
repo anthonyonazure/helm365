@@ -1,11 +1,12 @@
 import { useEffect } from 'react';
 import { Outlet, NavLink, useLocation } from 'react-router-dom';
 import { CommandBar } from '../components/CommandBar';
-import { Ship, LayoutDashboard, Activity, Shield, HardDrive, Settings, Moon, Sun, Bell } from 'lucide-react';
+import { Ship, LayoutDashboard, MessageSquare, Activity, Shield, HardDrive, Settings, Moon, Sun, Bell } from 'lucide-react';
 import { useHelmStore } from '@/lib/store';
 
 const NAV_ITEMS = [
   { label: 'Dashboard', path: '/', icon: LayoutDashboard },
+  { label: 'Chat', path: '/chat', icon: MessageSquare },
   { label: 'Feed', path: '/feed', icon: Activity },
   { label: 'Operations', path: '/operations', icon: Shield },
   { label: 'Tenants', path: '/tenants', icon: HardDrive },
