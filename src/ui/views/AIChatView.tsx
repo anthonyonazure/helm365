@@ -27,6 +27,19 @@ const AGENT_LABELS: Record<AgentType, { label: string; color: string }> = {
   policy: { label: 'Policy', color: 'text-amber-600 bg-amber-50 dark:bg-amber-900/20' },
 };
 
+const SUGGESTIONS = [
+  'Reset MFA for a user',
+  'Check secure score',
+  'Run CMMC compliance assessment',
+  'Show risky sign-ins',
+  'List unused licenses',
+  'Block a spam sender',
+  'Check drift status',
+  'Investigate compromised account',
+  'Generate tenant health report',
+  'Show noncompliant devices',
+];
+
 export function AIChatView() {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -199,6 +212,20 @@ export function AIChatView() {
             {isProcessing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
           </button>
         </div>
+        {/* Suggestion chips — show when chat is empty or idle */}
+        {messages.length <= 1 && !isProcessing && (
+          <div className="flex flex-wrap gap-1.5 mt-2 justify-center">
+            {SUGGESTIONS.map((s) => (
+              <button
+                key={s}
+                onClick={() => { setInput(s); inputRef.current?.focus(); }}
+                className="text-[11px] px-2.5 py-1 rounded-full border text-muted-foreground hover:text-foreground hover:border-helm-500 hover:bg-helm-50 dark:hover:bg-helm-950/20 transition-colors"
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+        )}
         <p className="text-[10px] text-muted-foreground mt-1 text-center">
           Helm365 routes commands to specialist agents. GREEN actions auto-execute. YELLOW/RED require approval.
         </p>
