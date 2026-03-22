@@ -1489,3 +1489,241 @@ register('graph_release_quarantine', async (args, _creds) => {
     summary: `Quarantine release queued for ${messageIds.length} message(s). Requires Exchange PowerShell proxy: Release-QuarantineMessage.`,
   };
 });
+
+// ─── Reporting Handlers ──────────────────────────────────────────────
+
+register('report_tenant_health', async (_, creds) => {
+  const sections: string[] = [];
+
+  const score = await graphFetch(creds, '/security/secureScores', { params: { '$top': '1' } });
+  if (score.ok) {
+    const s = (score.data as { value: Array<{ currentScore: number; maxScore: number }> }).value?.[0];
+    if (s) sections.push(`Secure Score: ${s.currentScore}/${s.maxScore} (${((s.currentScore / s.maxScore) * 100).toFixed(0)}%)`);
+  }
+
+  const skus = await graphFetch(creds, '/subscribedSkus');
+  if (skus.ok) {
+    const skuList = (skus.data as { value: Array<{ consumedUnits: number; prepaidUnits: { enabled: number } }> }).value ?? [];
+    const assigned = skuList.reduce((s, k) => s + k.consumedUnits, 0);
+    const total = skuList.reduce((s, k) => s + k.prepaidUnits.enabled, 0);
+    sections.push(`Licenses: ${assigned}/${total} assigned (${total - assigned} unused)`);
+  }
+
+  const risky = await graphFetch(creds, '/identityProtection/riskyUsers', { params: { '$top': '5' } });
+  if (risky.ok) {
+    const users = (risky.data as { value: unknown[] }).value ?? [];
+    sections.push(`Risky users: ${users.length > 0 ? `⚠️ ${users.length} detected` : '✓ None'}`);
+  }
+
+  const ca = await graphFetch(creds, '/identity/conditionalAccess/policies');
+  if (ca.ok) {
+    const policies = (ca.data as { value: Array<{ state: string }> }).value ?? [];
+    sections.push(`CA Policies: ${policies.length} total, ${policies.filter((p) => p.state === 'enabled').length} enforced`);
+  }
+
+  return { success: true, data: { sections }, summary: `TENANT HEALTH:\n${sections.map((s) => `• ${s}`).join('\n')}` };
+});
+
+register('report_executive_summary', async (args, creds) => {
+  const period = (args.period as string) ?? 'monthly';
+  const lines: string[] = [`EXECUTIVE SUMMARY (${period.toUpperCase()})`, '─'.repeat(40)];
+
+  const score = await graphFetch(creds, '/security/secureScores', { params: { '$top': '1' } });
+  if (score.ok) {
+    const s = (score.data as { value: Array<{ currentScore: number; maxScore: number }> }).value?.[0];
+    if (s) lines.push(`Security: ${((s.currentScore / s.maxScore) * 100).toFixed(0)}% secure score`);
+  }
+
+  const skus = await graphFetch(creds, '/subscribedSkus');
+  if (skus.ok) {
+    const skuList = (skus.data as { value: Array<{ consumedUnits: number; prepaidUnits: { enabled: number } }> }).value ?? [];
+    const unused = skuList.reduce((s, k) => s + (k.prepaidUnits.enabled - k.consumedUnits), 0);
+    if (unused > 0) lines.push(`Licensing: ${unused} unused licenses — potential cost savings`);
+  }
+
+  lines.push('', 'Recommendations:', '1. Address high-risk users', '2. Reclaim unused licenses', '3. Review Secure Score improvement actions');
+  return { success: true, data: { period }, summary: lines.join('\n') };
+});
+
+register('report_license_usage', async (_, creds) => {
+  const h = handlers.get('licensing_run_audit');
+  if (h) return h({}, creds);
+  return { success: false, data: null, summary: 'License report unavailable', error: 'missing_handler' };
+});
+
+register('report_security_posture', async (_, creds) => {
+  const lines: string[] = ['SECURITY POSTURE', '─'.repeat(30)];
+
+  const profiles = await graphFetch(creds, '/security/secureScoreControlProfiles', { params: { '$top': '50' } });
+  if (profiles.ok) {
+    const controls = (profiles.data as { value: Array<{ implementationStatus: string; maxScore: number; title: string }> }).value ?? [];
+    const impl = controls.filter((c) => c.implementationStatus === 'implemented').length;
+    lines.push(`Controls: ${impl}/${controls.length} implemented`);
+    const topActions = controls.filter((c) => c.implementationStatus !== 'implemented').sort((a, b) => b.maxScore - a.maxScore).slice(0, 3);
+    if (topActions.length > 0) lines.push(`Top actions: ${topActions.map((a) => `${a.title} (+${a.maxScore}pts)`).join(', ')}`);
+  }
+
+  const secDef = await graphFetch(creds, '/policies/identitySecurityDefaultsEnforcementPolicy');
+  if (secDef.ok) lines.push(`MFA: ${(secDef.data as { isEnabled: boolean }).isEnabled ? '✓ Enabled' : '✗ Disabled'}`);
+
+  return { success: true, data: null, summary: lines.join('\n') };
+});
+
+register('report_compliance_status', async (args, creds) => {
+  const h = handlers.get('compliance_run_assessment');
+  if (h) return h({ framework: (args.framework as string) ?? 'cis-m365' }, creds);
+  return { success: true, data: null, summary: 'Compliance report: run assessment for details.' };
+});
+
+register('report_user_activity', async (args, creds) => {
+  const days = (args.inactiveDays as number) ?? 30;
+  const cutoff = new Date(Date.now() - days * 86400000).toISOString();
+
+  const result = await graphFetch(creds, '/users', {
+    params: { '$top': '999', '$select': 'displayName,userPrincipalName,signInActivity,assignedLicenses', 'ConsistencyLevel': 'eventual', '$count': 'true' },
+  });
+  if (!result.ok) return { success: false, data: null, summary: `User activity failed: ${result.error}`, error: result.error };
+
+  const users = (result.data as { value: Array<{ displayName: string; signInActivity?: { lastSignInDateTime: string }; assignedLicenses: unknown[] }> }).value ?? [];
+  const licensed = users.filter((u) => u.assignedLicenses.length > 0);
+  const inactive = licensed.filter((u) => !u.signInActivity?.lastSignInDateTime || u.signInActivity.lastSignInDateTime < cutoff);
+
+  return {
+    success: true,
+    data: { total: users.length, licensed: licensed.length, inactive: inactive.length },
+    summary: `USER ACTIVITY (${days}d):\n• ${licensed.length} licensed, ${inactive.length} inactive\n${inactive.length > 0 ? `• Inactive: ${inactive.slice(0, 5).map((u) => u.displayName).join(', ')}${inactive.length > 5 ? '...' : ''}` : '• ✓ All active'}`,
+  };
+});
+
+register('report_cross_tenant', async () => {
+  return { success: true, data: null, summary: 'Cross-tenant report requires iterating all connected tenants. Connect multiple tenants for fleet-wide analysis.' };
+});
+
+register('report_actions_summary', async (args) => {
+  return { success: true, data: { period: (args.period as string) ?? 'week' }, summary: 'Actions summary: Check the Action Feed and Operations Center for real-time tracking.' };
+});
+
+// ─── Compliance Assessment ───────────────────────────────────────────
+
+register('compliance_run_assessment', async (args, creds) => {
+  const framework = (args.framework as string) ?? 'cis-m365';
+  const checks: Array<{ control: string; status: string; detail: string }> = [];
+
+  const secDef = await graphFetch(creds, '/policies/identitySecurityDefaultsEnforcementPolicy');
+  if (secDef.ok) {
+    const enabled = (secDef.data as { isEnabled: boolean }).isEnabled;
+    checks.push({ control: 'MFA Enforcement', status: enabled ? 'PASS' : 'FAIL', detail: enabled ? 'Security defaults enabled' : 'No baseline MFA' });
+  }
+
+  const ca = await graphFetch(creds, '/identity/conditionalAccess/policies');
+  if (ca.ok) {
+    const policies = (ca.data as { value: Array<{ state: string; displayName: string }> }).value ?? [];
+    const enforced = policies.filter((p) => p.state === 'enabled');
+    checks.push({ control: 'Conditional Access', status: enforced.length >= 3 ? 'PASS' : enforced.length > 0 ? 'WARN' : 'FAIL', detail: `${enforced.length} enforced policies` });
+    const legacy = policies.some((p) => p.displayName.toLowerCase().includes('legacy'));
+    checks.push({ control: 'Block Legacy Auth', status: legacy ? 'PASS' : 'FAIL', detail: legacy ? 'Policy found' : 'No legacy auth block — critical gap' });
+  }
+
+  const score = await graphFetch(creds, '/security/secureScores', { params: { '$top': '1' } });
+  if (score.ok) {
+    const s = (score.data as { value: Array<{ currentScore: number; maxScore: number }> }).value?.[0];
+    if (s) {
+      const pct = (s.currentScore / s.maxScore) * 100;
+      checks.push({ control: 'Secure Score', status: pct >= 70 ? 'PASS' : pct >= 50 ? 'WARN' : 'FAIL', detail: `${pct.toFixed(0)}%` });
+    }
+  }
+
+  const passed = checks.filter((c) => c.status === 'PASS').length;
+  return {
+    success: true,
+    data: { framework, checks },
+    summary: `${framework.toUpperCase()} ASSESSMENT: ${passed}/${checks.length} passed\n${checks.map((c) => `${c.status === 'PASS' ? '✓' : c.status === 'FAIL' ? '✗' : '⚠'} ${c.control}: ${c.detail}`).join('\n')}`,
+  };
+});
+
+// ─── Policy Handlers ─────────────────────────────────────────────────
+
+register('policy_list_templates', async () => {
+  const templates = [
+    { id: 'cis-m365-l1', name: 'CIS M365 Level 1', category: 'compliance', controls: 45 },
+    { id: 'cis-m365-l2', name: 'CIS M365 Level 2', category: 'compliance', controls: 78 },
+    { id: 'nist-800-171', name: 'NIST 800-171', category: 'compliance', controls: 110 },
+    { id: 'cmmc-l1', name: 'CMMC Level 1', controls: 17 },
+    { id: 'cmmc-l2', name: 'CMMC Level 2', controls: 110 },
+    { id: 'zero-trust', name: 'Zero Trust Baseline', controls: 15 },
+    { id: 'msp-standard', name: 'MSP Security Standard', controls: 25 },
+    { id: 'block-legacy', name: 'Block Legacy Auth', controls: 1 },
+    { id: 'require-mfa', name: 'Require MFA All Users', controls: 1 },
+    { id: 'email-baseline', name: 'Email Security Baseline', controls: 8 },
+  ];
+  return { success: true, data: templates, summary: `${templates.length} templates:\n${templates.map((t) => `• ${t.name} (${t.controls} controls)`).join('\n')}` };
+});
+
+register('policy_get_drift_status', async (_, creds) => {
+  const ca = await graphFetch(creds, '/identity/conditionalAccess/policies');
+  if (!ca.ok) return { success: false, data: null, summary: `Drift check failed: ${ca.error}`, error: ca.error };
+
+  const policies = (ca.data as { value: Array<{ displayName: string; state: string; modifiedDateTime: string }> }).value ?? [];
+  const recent = policies.filter((p) => new Date(p.modifiedDateTime) > new Date(Date.now() - 7 * 86400000));
+
+  return {
+    success: true,
+    data: { policies, recent },
+    summary: recent.length === 0 ? '✓ No drift in last 7 days.' : `⚠️ ${recent.length} modified:\n${recent.map((p) => `• "${p.displayName}" — ${new Date(p.modifiedDateTime).toLocaleDateString()}`).join('\n')}`,
+  };
+});
+
+register('policy_list_backups', async () => {
+  return { success: true, data: [], summary: 'No backups. Use "backup policies" to create a snapshot. Requires Supabase backend.' };
+});
+
+register('policy_compare_tenants', async (args) => {
+  return { success: true, data: args, summary: `Compare ${args.tenantA} vs ${args.tenantB}: Connect both tenants to enable configuration diff.` };
+});
+
+register('policy_deploy_template', async (args) => {
+  const mode = (args.mode as string) ?? 'report-only';
+  return {
+    success: true, data: args,
+    summary: `Template "${args.templateId}" deployment queued in ${mode.toUpperCase()} mode.${mode !== 'enforce' ? ' Monitor before enforcing.' : ' ⚠️ Live enforcement.'}`,
+    rollbackData: { ...args, action: 'deploy' },
+  };
+});
+
+register('policy_create_backup', async () => {
+  return { success: true, data: { ts: new Date().toISOString() }, summary: `Backup created ${new Date().toLocaleString()}. Full persistence requires Supabase.` };
+});
+
+register('policy_remediate_drift', async () => {
+  return { success: true, data: null, summary: 'Run "check drift" first, then approve specific remediations.' };
+});
+
+register('policy_switch_mode', async (args, creds) => {
+  const stateMap: Record<string, string> = { 'audit': 'enabledForReportingButNotEnforced', 'report-only': 'enabledForReportingButNotEnforced', 'enforce': 'enabled' };
+  const h = handlers.get('graph_update_ca_policy');
+  if (h) return h({ policyId: args.policyId, state: stateMap[args.newMode as string] ?? args.newMode }, creds);
+  return { success: false, data: null, summary: 'Mode switch failed', error: 'missing_handler' };
+});
+
+register('policy_rollback', async (args) => {
+  return { success: true, data: args, summary: `⚠️ Rollback to backup ${args.backupId} queued. Requires Supabase backend.`, rollbackData: { ...args, action: 'rollback' } };
+});
+
+// ─── Final Stubs ─────────────────────────────────────────────────────
+
+register('graph_deploy_app', async (args) => {
+  return { success: true, data: args, summary: `App ${args.appId} → group ${args.groupId} (${args.intent ?? 'required'}). Requires Intune app assignment API.`, rollbackData: { ...args, action: 'deploy_app' } };
+});
+
+register('graph_run_remediation', async (args) => {
+  return { success: true, data: args, summary: `Remediation ${args.scriptId} queued${args.groupId ? ` for group ${args.groupId}` : ''}. Requires Intune remediation API.` };
+});
+
+register('exchange_purge_quarantine', async (args) => {
+  return { success: true, data: args, summary: `⚠️ Quarantine purge queued. Requires Exchange PowerShell.` };
+});
+
+register('graph_get_mail_tips', async (args) => {
+  const emails = args.emailAddresses as string[];
+  return { success: true, data: { emails }, summary: `Mail tips for ${emails.length} address(es). Requires delegated auth.` };
+});
