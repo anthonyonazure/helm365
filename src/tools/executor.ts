@@ -828,3 +828,302 @@ register('graph_list_managed_devices', async (args, creds) => {
     summary: `${devices.length} managed device(s). ${noncompliant > 0 ? `⚠️ ${noncompliant} noncompliant.` : '✓ All compliant.'} Devices: ${devices.slice(0, 5).map((d) => `${d.deviceName} (${d.userDisplayName}, ${d.operatingSystem})`).join(', ')}`,
   };
 });
+
+register('graph_list_noncompliant_devices', async (args, creds) => {
+  const top = (args.top as number) ?? 50;
+  const result = await graphFetch(creds, '/deviceManagement/managedDevices', {
+    params: {
+      '$top': String(top),
+      '$filter': "complianceState eq 'noncompliant'",
+      '$select': 'id,deviceName,userDisplayName,operatingSystem,complianceState,lastSyncDateTime,complianceGracePeriodExpirationDateTime',
+    },
+  });
+  if (!result.ok) return { success: false, data: null, summary: `Noncompliant devices failed: ${result.error}`, error: result.error };
+
+  const devices = (result.data as { value: Array<{ deviceName: string; userDisplayName: string; operatingSystem: string }> }).value ?? [];
+
+  return {
+    success: true,
+    data: devices,
+    summary: devices.length === 0
+      ? '✓ No noncompliant devices found.'
+      : `⚠️ ${devices.length} noncompliant device(s): ${devices.slice(0, 5).map((d) => `${d.deviceName} (${d.userDisplayName})`).join(', ')}`,
+  };
+});
+
+register('graph_get_device', async (args, creds) => {
+  const deviceId = args.deviceId as string;
+  const result = await graphFetch(creds, `/deviceManagement/managedDevices/${deviceId}`);
+  if (!result.ok) return { success: false, data: null, summary: `Device lookup failed: ${result.error}`, error: result.error };
+
+  const d = result.data as Record<string, unknown>;
+  return {
+    success: true,
+    data: d,
+    summary: `${d.deviceName}: ${d.operatingSystem} ${d.osVersion}, User: ${d.userDisplayName}, Compliance: ${d.complianceState}, Last sync: ${d.lastSyncDateTime}`,
+  };
+});
+
+register('graph_sync_device', async (args, creds) => {
+  const deviceId = args.deviceId as string;
+  const result = await graphFetch(creds, `/deviceManagement/managedDevices/${deviceId}/syncDevice`, { method: 'POST' });
+  if (!result.ok) return { success: false, data: null, summary: `Device sync failed: ${result.error}`, error: result.error };
+
+  return { success: true, data: null, summary: `Sync triggered for device ${deviceId}. Device will pull latest policies on next check-in.` };
+});
+
+register('graph_wipe_device', async (args, creds) => {
+  const deviceId = args.deviceId as string;
+  const keepUserData = (args.keepUserData as boolean) ?? false;
+
+  // Get device info first for the summary
+  const deviceInfo = await graphFetch(creds, `/deviceManagement/managedDevices/${deviceId}`, {
+    params: { '$select': 'deviceName,userDisplayName' },
+  });
+  const deviceName = (deviceInfo.data as Record<string, unknown>)?.deviceName ?? deviceId;
+
+  const result = await graphFetch(creds, `/deviceManagement/managedDevices/${deviceId}/wipe`, {
+    method: 'POST',
+    body: { keepUserData },
+  });
+  if (!result.ok) return { success: false, data: null, summary: `Device wipe failed: ${result.error}`, error: result.error };
+
+  return {
+    success: true,
+    data: { deviceId, keepUserData },
+    summary: keepUserData
+      ? `Selective wipe initiated for ${deviceName}. Company data will be removed, personal data preserved.`
+      : `⚠️ FULL WIPE initiated for ${deviceName}. ALL data will be erased and device factory reset.`,
+    rollbackData: { deviceId, action: 'wipe', keepUserData },
+  };
+});
+
+register('graph_retire_device', async (args, creds) => {
+  const deviceId = args.deviceId as string;
+  const deviceInfo = await graphFetch(creds, `/deviceManagement/managedDevices/${deviceId}`, {
+    params: { '$select': 'deviceName,userDisplayName' },
+  });
+  const deviceName = (deviceInfo.data as Record<string, unknown>)?.deviceName ?? deviceId;
+
+  const result = await graphFetch(creds, `/deviceManagement/managedDevices/${deviceId}/retire`, { method: 'POST' });
+  if (!result.ok) return { success: false, data: null, summary: `Device retire failed: ${result.error}`, error: result.error };
+
+  return {
+    success: true,
+    data: { deviceId },
+    summary: `Device ${deviceName} retired. Company data and management profile removed. Personal data preserved.`,
+    rollbackData: { deviceId, action: 'retire' },
+  };
+});
+
+// ─── More Security Handlers ──────────────────────────────────────────
+
+register('graph_list_risky_signins', async (args, creds) => {
+  const params: Record<string, string> = {
+    '$top': String((args.top as number) ?? 25),
+    '$orderby': 'activityDateTime desc',
+    '$select': 'id,userId,userDisplayName,ipAddress,location,riskLevelDuringSignIn,riskState,activityDateTime,clientAppUsed',
+  };
+  if (args.riskLevel) params['$filter'] = `riskLevelDuringSignIn eq '${args.riskLevel}'`;
+
+  const result = await graphFetch(creds, '/identityProtection/riskyServicePrincipals', { params });
+
+  // Fallback to sign-in logs if risky service principals endpoint fails
+  if (!result.ok) {
+    const fallback = await graphFetch(creds, '/auditLogs/signIns', {
+      params: { '$top': '25', '$filter': "riskLevelDuringSignIn ne 'none'", '$orderby': 'createdDateTime desc' },
+    });
+    if (!fallback.ok) return { success: false, data: null, summary: `Risky sign-ins failed: ${result.error}`, error: result.error };
+
+    const entries = (fallback.data as { value: unknown[] }).value ?? [];
+    return { success: true, data: entries, summary: `${entries.length} risky sign-in(s) found via audit logs.` };
+  }
+
+  const entries = (result.data as { value: Array<{ userDisplayName: string; riskLevelDuringSignIn: string; location: { city: string } }> }).value ?? [];
+  return {
+    success: true,
+    data: entries,
+    summary: entries.length === 0
+      ? '✓ No risky sign-ins detected.'
+      : `⚠️ ${entries.length} risky sign-in(s): ${entries.slice(0, 5).map((e) => `${e.userDisplayName} (${e.riskLevelDuringSignIn}, ${e.location?.city ?? 'unknown'})`).join(', ')}`,
+  };
+});
+
+register('graph_list_security_alerts', async (args, creds) => {
+  const params: Record<string, string> = {
+    '$top': String((args.top as number) ?? 25),
+    '$orderby': 'createdDateTime desc',
+  };
+  const filters: string[] = [];
+  if (args.severity) filters.push(`severity eq '${args.severity}'`);
+  if (args.status) filters.push(`status eq '${args.status}'`);
+  if (filters.length > 0) params['$filter'] = filters.join(' and ');
+
+  const result = await graphFetch(creds, '/security/alerts_v2', { params });
+  if (!result.ok) return { success: false, data: null, summary: `Security alerts failed: ${result.error}`, error: result.error };
+
+  const alerts = (result.data as { value: Array<{
+    title: string; severity: string; status: string; createdDateTime: string;
+  }> }).value ?? [];
+
+  return {
+    success: true,
+    data: alerts,
+    summary: alerts.length === 0
+      ? '✓ No active security alerts.'
+      : `${alerts.length} alert(s): ${alerts.slice(0, 5).map((a) => `"${a.title}" (${a.severity}, ${a.status})`).join(', ')}`,
+  };
+});
+
+register('graph_dismiss_risky_user', async (args, creds) => {
+  const userId = args.userId as string;
+  const result = await graphFetch(creds, '/identityProtection/riskyUsers/dismiss', {
+    method: 'POST',
+    body: { userIds: [userId] },
+  });
+  if (!result.ok) return { success: false, data: null, summary: `Dismiss failed: ${result.error}`, error: result.error };
+
+  return { success: true, data: null, summary: `Risk dismissed for user ${userId}. Risk state set to "dismissed".` };
+});
+
+register('graph_confirm_compromised', async (args, creds) => {
+  const userId = args.userId as string;
+  const result = await graphFetch(creds, '/identityProtection/riskyUsers/confirmCompromised', {
+    method: 'POST',
+    body: { userIds: [userId] },
+  });
+  if (!result.ok) return { success: false, data: null, summary: `Confirm compromised failed: ${result.error}`, error: result.error };
+
+  return { success: true, data: null, summary: `⚠️ User ${userId} confirmed as COMPROMISED. Risk-based Conditional Access policies will trigger.` };
+});
+
+register('graph_revoke_app_consent', async (args, creds) => {
+  const grantId = args.grantId as string;
+  const result = await graphFetch(creds, `/oauth2PermissionGrants/${grantId}`, { method: 'DELETE' });
+  if (!result.ok) return { success: false, data: null, summary: `Revoke consent failed: ${result.error}`, error: result.error };
+
+  return {
+    success: true,
+    data: null,
+    summary: `OAuth consent grant ${grantId} revoked. Apps using this grant will lose access.`,
+    rollbackData: { grantId, action: 'revoke_consent' },
+  };
+});
+
+// ─── More Compliance Handlers ────────────────────────────────────────
+
+register('graph_get_secure_score_profiles', async (args, creds) => {
+  const top = (args.top as number) ?? 50;
+  const result = await graphFetch(creds, '/security/secureScoreControlProfiles', {
+    params: { '$top': String(top) },
+  });
+  if (!result.ok) return { success: false, data: null, summary: `Secure score profiles failed: ${result.error}`, error: result.error };
+
+  const profiles = (result.data as { value: Array<{
+    title: string; maxScore: number; controlCategory: string; implementationStatus: string;
+  }> }).value ?? [];
+
+  const notImpl = profiles.filter((p) => p.implementationStatus !== 'implemented');
+
+  return {
+    success: true,
+    data: profiles,
+    summary: `${profiles.length} improvement action(s). ${notImpl.length} not yet implemented. Top opportunities: ${notImpl.slice(0, 5).map((p) => `"${p.title}" (+${p.maxScore}pts)`).join(', ')}`,
+  };
+});
+
+register('graph_create_ca_policy', async (args, creds) => {
+  const state = (args.state as string) ?? 'enabledForReportingButNotEnforced';
+  const result = await graphFetch(creds, '/identity/conditionalAccess/policies', {
+    method: 'POST',
+    body: {
+      displayName: args.displayName,
+      state,
+      conditions: args.conditions ?? { users: { includeUsers: ['All'] }, applications: { includeApplications: ['All'] } },
+      grantControls: args.grantControls ?? { operator: 'OR', builtInControls: ['mfa'] },
+      ...(args.sessionControls ? { sessionControls: args.sessionControls } : {}),
+    },
+  });
+
+  if (!result.ok) return { success: false, data: null, summary: `CA policy creation failed: ${result.error}`, error: result.error };
+
+  const policy = result.data as Record<string, unknown>;
+  return {
+    success: true,
+    data: policy,
+    summary: `CA policy "${args.displayName}" created in ${state === 'enabledForReportingButNotEnforced' ? 'REPORT-ONLY' : state.toUpperCase()} mode.${state === 'enabledForReportingButNotEnforced' ? ' Monitor for 7+ days before enforcing.' : ''}`,
+    rollbackData: { policyId: policy.id, action: 'create_ca_policy' },
+  };
+});
+
+register('graph_update_ca_policy', async (args, creds) => {
+  const policyId = args.policyId as string;
+  const body: Record<string, unknown> = {};
+  if (args.state) body.state = args.state;
+  if (args.displayName) body.displayName = args.displayName;
+  if (args.conditions) body.conditions = args.conditions;
+  if (args.grantControls) body.grantControls = args.grantControls;
+
+  // Capture current state for rollback
+  const current = await graphFetch(creds, `/identity/conditionalAccess/policies/${policyId}`);
+
+  const result = await graphFetch(creds, `/identity/conditionalAccess/policies/${policyId}`, {
+    method: 'PATCH',
+    body,
+  });
+
+  if (!result.ok) return { success: false, data: null, summary: `CA policy update failed: ${result.error}`, error: result.error };
+
+  const changes = Object.keys(body).join(', ');
+  return {
+    success: true,
+    data: body,
+    summary: `CA policy ${policyId} updated: ${changes}.`,
+    rollbackData: { policyId, previousState: current.data, action: 'update_ca_policy' },
+  };
+});
+
+register('graph_delete_ca_policy', async (args, creds) => {
+  const policyId = args.policyId as string;
+
+  // Capture full policy for audit/rollback
+  const current = await graphFetch(creds, `/identity/conditionalAccess/policies/${policyId}`);
+  const policyName = (current.data as Record<string, unknown>)?.displayName ?? policyId;
+
+  const result = await graphFetch(creds, `/identity/conditionalAccess/policies/${policyId}`, { method: 'DELETE' });
+  if (!result.ok) return { success: false, data: null, summary: `CA policy deletion failed: ${result.error}`, error: result.error };
+
+  return {
+    success: true,
+    data: null,
+    summary: `⚠️ CA policy "${policyName}" DELETED. This may immediately affect user access.`,
+    rollbackData: { policyId, policyData: current.data, action: 'delete_ca_policy' },
+  };
+});
+
+register('graph_list_auth_methods_policy', async (_, creds) => {
+  const result = await graphFetch(creds, '/policies/authenticationMethodsPolicy');
+  if (!result.ok) return { success: false, data: null, summary: `Auth methods policy failed: ${result.error}`, error: result.error };
+
+  const policy = result.data as { authenticationMethodConfigurations: Array<{ id: string; state: string }> };
+  const methods = policy.authenticationMethodConfigurations ?? [];
+  const enabled = methods.filter((m) => m.state === 'enabled');
+
+  return {
+    success: true,
+    data: policy,
+    summary: `${methods.length} auth method(s) configured. ${enabled.length} enabled: ${enabled.map((m) => m.id).join(', ')}`,
+  };
+});
+
+register('graph_get_directory_settings', async (_, creds) => {
+  const result = await graphFetch(creds, '/settings');
+  if (!result.ok) return { success: false, data: null, summary: `Directory settings failed: ${result.error}`, error: result.error };
+
+  const settings = (result.data as { value: Array<{ displayName: string }> }).value ?? [];
+  return {
+    success: true,
+    data: settings,
+    summary: `${settings.length} directory setting(s): ${settings.map((s) => s.displayName).join(', ')}`,
+  };
+});
