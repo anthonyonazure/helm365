@@ -9,6 +9,10 @@ import type { Action } from '@/types/gateway';
 import type { TeamRole } from '@/gateway/permissions';
 import type { GraphCredentials } from './graph-client';
 import { USER_TOOLS } from '@/tools/graph/users';
+import { EXCHANGE_TOOLS } from '@/tools/graph/exchange';
+import { SECURITY_TOOLS } from '@/tools/graph/security';
+import { COMPLIANCE_TOOLS } from '@/tools/graph/compliance';
+import { LICENSING_TOOLS } from '@/tools/graph/licensing';
 
 /**
  * Helm365 Engine — orchestrates the full command flow:
@@ -32,7 +36,7 @@ export interface CommandResult {
 }
 
 // Tool registry — all tools across all agents
-const ALL_TOOLS = [...USER_TOOLS];
+const ALL_TOOLS = [...USER_TOOLS, ...EXCHANGE_TOOLS, ...SECURITY_TOOLS, ...COMPLIANCE_TOOLS, ...LICENSING_TOOLS];
 
 /**
  * Match parsed intent to a specific tool from the registry.
@@ -62,6 +66,8 @@ function matchTool(intent: string, agent: string, action?: string) {
 
   // Keyword matching in intent
   const lower = intent.toLowerCase();
+
+  // Identity tools
   if (lower.includes('reset') && lower.includes('mfa')) return agentTools.find((t) => t.name === 'graph_reset_mfa');
   if (lower.includes('reset') && lower.includes('password')) return agentTools.find((t) => t.name === 'graph_reset_password');
   if (lower.includes('unlock') || lower.includes('unblock')) return agentTools.find((t) => t.name === 'graph_unlock_account');
@@ -69,12 +75,48 @@ function matchTool(intent: string, agent: string, action?: string) {
   if (lower.includes('offboard') || lower.includes('disable')) return agentTools.find((t) => t.name === 'graph_disable_user');
   if (lower.includes('delete user') || lower.includes('remove user')) return agentTools.find((t) => t.name === 'graph_delete_user');
   if (lower.includes('license') && lower.includes('assign')) return agentTools.find((t) => t.name === 'graph_assign_license');
-  if (lower.includes('search') || lower.includes('find') || lower.includes('look up') || lower.includes('show me')) return agentTools.find((t) => t.name === 'graph_search_users');
   if (lower.includes('group') && lower.includes('add')) return agentTools.find((t) => t.name === 'graph_add_group_member');
   if (lower.includes('group') && lower.includes('remove')) return agentTools.find((t) => t.name === 'graph_remove_group_member');
 
-  // Default: search users (read-only, safe)
-  return agentTools.find((t) => t.name === 'graph_search_users') ?? agentTools[0];
+  // Exchange tools
+  if (lower.includes('block') && (lower.includes('sender') || lower.includes('spam'))) return agentTools.find((t) => t.name === 'exchange_block_sender');
+  if (lower.includes('allow') && (lower.includes('sender') || lower.includes('whitelist'))) return agentTools.find((t) => t.name === 'exchange_allow_sender');
+  if (lower.includes('quarantine') && lower.includes('release')) return agentTools.find((t) => t.name === 'graph_release_quarantine');
+  if (lower.includes('quarantine')) return agentTools.find((t) => t.name === 'graph_list_quarantine');
+  if (lower.includes('message trace') || lower.includes('trace')) return agentTools.find((t) => t.name === 'graph_message_trace');
+  if (lower.includes('forward') && lower.includes('email')) return agentTools.find((t) => t.name === 'graph_set_email_forwarding');
+  if (lower.includes('auto reply') || lower.includes('out of office') || lower.includes('ooo')) return agentTools.find((t) => t.name === 'graph_set_auto_reply');
+  if (lower.includes('shared mailbox')) return agentTools.find((t) => t.name === 'graph_create_shared_mailbox');
+  if (lower.includes('send as') || lower.includes('full access') || lower.includes('send on behalf') || lower.includes('mailbox') && lower.includes('access')) return agentTools.find((t) => t.name === 'graph_grant_mailbox_access');
+  if (lower.includes('mailbox')) return agentTools.find((t) => t.name === 'graph_list_mailboxes');
+
+  // Security tools
+  if (lower.includes('secure score')) return agentTools.find((t) => t.name === 'graph_get_secure_score');
+  if (lower.includes('risky user')) return agentTools.find((t) => t.name === 'graph_list_risky_users');
+  if (lower.includes('risky sign') || lower.includes('suspicious sign')) return agentTools.find((t) => t.name === 'graph_list_risky_signins');
+  if (lower.includes('security alert')) return agentTools.find((t) => t.name === 'graph_list_security_alerts');
+  if (lower.includes('sign-in log') || lower.includes('signin log') || lower.includes('login history')) return agentTools.find((t) => t.name === 'graph_get_sign_in_logs');
+  if (lower.includes('audit log') || lower.includes('who changed') || lower.includes('what happened')) return agentTools.find((t) => t.name === 'graph_get_audit_logs');
+  if (lower.includes('inbox rule')) return agentTools.find((t) => t.name === 'graph_check_inbox_rules');
+  if (lower.includes('app consent') || lower.includes('oauth')) return agentTools.find((t) => t.name === 'graph_list_app_consents');
+  if (lower.includes('investigate') || lower.includes('compromised')) return agentTools.find((t) => t.name === 'security_investigate_account');
+
+  // Compliance tools
+  if (lower.includes('cmmc') || lower.includes('nist') || lower.includes('cis') || lower.includes('hipaa') || lower.includes('soc2') || lower.includes('iso') || lower.includes('compliance') && lower.includes('assess')) return agentTools.find((t) => t.name === 'compliance_run_assessment');
+  if (lower.includes('conditional access') && lower.includes('list')) return agentTools.find((t) => t.name === 'graph_list_ca_policies');
+  if (lower.includes('conditional access') && (lower.includes('create') || lower.includes('add'))) return agentTools.find((t) => t.name === 'graph_create_ca_policy');
+  if (lower.includes('security default')) return agentTools.find((t) => t.name === 'graph_check_security_defaults');
+
+  // Licensing tools
+  if (lower.includes('license') && (lower.includes('audit') || lower.includes('waste') || lower.includes('unused') || lower.includes('optimize'))) return agentTools.find((t) => t.name === 'licensing_run_audit');
+  if (lower.includes('license') && (lower.includes('list') || lower.includes('inventory') || lower.includes('sku'))) return agentTools.find((t) => t.name === 'graph_list_subscribed_skus');
+  if (lower.includes('copilot') && lower.includes('readiness')) return agentTools.find((t) => t.name === 'graph_copilot_readiness');
+
+  // Search fallback
+  if (lower.includes('search') || lower.includes('find') || lower.includes('look up') || lower.includes('show me')) return agentTools.find((t) => t.name === 'graph_search_users');
+
+  // Default: first green tool for the agent
+  return agentTools.find((t) => t.tier === 'green') ?? agentTools[0];
 }
 
 /**
