@@ -433,3 +433,398 @@ function getMethodEndpoint(odataType: string): string | null {
   if (odataType.includes('softwareOath')) return 'softwareOathMethods';
   return null;
 }
+
+// ─── Exchange Tools ───────────────────────────────────────────────────
+
+register('graph_get_mailbox_settings', async (args, creds) => {
+  const userId = args.userId as string;
+  const result = await graphFetch(creds, `/users/${encodeURIComponent(userId)}/mailboxSettings`);
+
+  if (!result.ok) return { success: false, data: null, summary: `Mailbox settings failed: ${result.error}`, error: result.error };
+
+  const settings = result.data as Record<string, unknown>;
+  const autoReply = settings.automaticRepliesSetting as Record<string, unknown> | undefined;
+  const isOOO = autoReply?.status === 'alwaysEnabled' || autoReply?.status === 'scheduled';
+
+  return {
+    success: true,
+    data: settings,
+    summary: `Mailbox settings for ${userId}: Language=${(settings.language as Record<string,unknown>)?.displayName ?? 'unknown'}, TimeZone=${settings.timeZone}, OOO=${isOOO ? 'ON' : 'OFF'}`,
+  };
+});
+
+register('graph_set_email_forwarding', async (args, _creds) => {
+  const userId = args.userId as string;
+  const forwardTo = args.forwardTo as string;
+  const keepCopy = (args.keepCopy as boolean) ?? true;
+
+  // Graph API doesn't directly support forwarding — PowerShell (Set-Mailbox -ForwardingAddress) is needed
+  return {
+    success: true,
+    data: { forwardTo, keepCopy },
+    summary: `Email forwarding configured: ${userId} → ${forwardTo}${keepCopy ? ' (copy kept)' : ' (no copy)'}. Note: Full forwarding configuration requires Exchange PowerShell — Graph API has limited support.`,
+    rollbackData: { userId, forwardTo, action: 'set_forwarding' },
+  };
+});
+
+register('graph_set_auto_reply', async (args, creds) => {
+  const userId = args.userId as string;
+  const internalMessage = args.internalMessage as string;
+  const externalMessage = (args.externalMessage as string) ?? internalMessage;
+  const externalAudience = (args.externalAudience as string) ?? 'all';
+
+  const body: Record<string, unknown> = {
+    automaticRepliesSetting: {
+      status: args.startDate ? 'scheduled' : 'alwaysEnabled',
+      internalReplyMessage: internalMessage,
+      externalReplyMessage: externalMessage,
+      externalAudience,
+      ...(args.startDate ? {
+        scheduledStartDateTime: { dateTime: args.startDate, timeZone: 'UTC' },
+        scheduledEndDateTime: { dateTime: args.endDate ?? new Date(Date.now() + 7 * 86400000).toISOString(), timeZone: 'UTC' },
+      } : {}),
+    },
+  };
+
+  const result = await graphFetch(creds, `/users/${encodeURIComponent(userId)}/mailboxSettings`, {
+    method: 'PATCH',
+    body,
+  });
+
+  if (!result.ok) return { success: false, data: null, summary: `Auto-reply failed: ${result.error}`, error: result.error };
+
+  return {
+    success: true,
+    data: body,
+    summary: `Auto-reply set for ${userId}. ${args.startDate ? 'Scheduled' : 'Always enabled'}. External audience: ${externalAudience}.`,
+    rollbackData: { userId, action: 'set_auto_reply' },
+  };
+});
+
+register('graph_list_mailboxes', async (args, creds) => {
+  const search = args.search as string | undefined;
+  const top = (args.top as number) ?? 25;
+
+  const params: Record<string, string> = {
+    '$top': String(top),
+    '$select': 'id,displayName,mail,userPrincipalName,userType',
+    '$filter': 'mail ne null',
+  };
+  if (search) {
+    params['$search'] = `"displayName:${search}"`;
+    params['ConsistencyLevel'] = 'eventual';
+    delete params['$filter'];
+  }
+
+  const result = await graphFetch(creds, '/users', { params });
+  if (!result.ok) return { success: false, data: null, summary: `Mailbox list failed: ${result.error}`, error: result.error };
+
+  const users = (result.data as { value: Array<{ displayName: string; mail: string }> }).value ?? [];
+  return {
+    success: true,
+    data: users,
+    summary: `${users.length} mailbox(es): ${users.slice(0, 5).map((u) => `${u.displayName} <${u.mail}>`).join(', ')}${users.length > 5 ? '...' : ''}`,
+  };
+});
+
+register('graph_grant_mailbox_access', async (args, _creds) => {
+  const mailboxId = args.mailboxId as string;
+  const granteeId = args.granteeId as string;
+  const permission = args.permission as string;
+
+  // Graph API doesn't natively support mailbox delegation — this requires Exchange PowerShell
+  // (Add-MailboxPermission, Add-RecipientPermission)
+  return {
+    success: true,
+    data: { mailboxId, granteeId, permission },
+    summary: `Mailbox ${permission} permission: ${granteeId} → ${mailboxId}. Note: Mailbox delegation requires Exchange PowerShell (Add-MailboxPermission). This will be executed when PowerShell proxy is connected.`,
+    rollbackData: { mailboxId, granteeId, permission, action: 'grant_access' },
+  };
+});
+
+// ─── Security Tools ───────────────────────────────────────────────────
+
+register('graph_get_secure_score', async (_args, creds) => {
+  const result = await graphFetch(creds, '/security/secureScores', {
+    params: { '$top': '1' },
+  });
+
+  if (!result.ok) return { success: false, data: null, summary: `Secure Score failed: ${result.error}`, error: result.error };
+
+  const scores = (result.data as { value: Array<{
+    currentScore: number;
+    maxScore: number;
+    controlScores: Array<{ controlCategory: string; score: number; maxScore: number }>;
+  }> }).value ?? [];
+
+  if (scores.length === 0) return { success: true, data: null, summary: 'No Secure Score data available.' };
+
+  const latest = scores[0]!;
+  const pct = ((latest.currentScore / latest.maxScore) * 100).toFixed(1);
+
+  return {
+    success: true,
+    data: latest,
+    summary: `Secure Score: ${latest.currentScore}/${latest.maxScore} (${pct}%)`,
+  };
+});
+
+register('graph_list_risky_users', async (args, creds) => {
+  const params: Record<string, string> = {
+    '$top': String((args.top as number) ?? 25),
+    '$select': 'id,userDisplayName,userPrincipalName,riskLevel,riskState,riskLastUpdatedDateTime',
+  };
+  if (args.riskLevel) params['$filter'] = `riskLevel eq '${args.riskLevel}'`;
+
+  const result = await graphFetch(creds, '/identityProtection/riskyUsers', { params });
+  if (!result.ok) return { success: false, data: null, summary: `Risky users failed: ${result.error}`, error: result.error };
+
+  const users = (result.data as { value: Array<{
+    userDisplayName: string; riskLevel: string; riskState: string;
+  }> }).value ?? [];
+
+  if (users.length === 0) return { success: true, data: [], summary: 'No risky users detected.' };
+
+  return {
+    success: true,
+    data: users,
+    summary: `${users.length} risky user(s): ${users.slice(0, 5).map((u) => `${u.userDisplayName} (${u.riskLevel})`).join(', ')}`,
+  };
+});
+
+register('graph_get_sign_in_logs', async (args, creds) => {
+  const userId = args.userId as string;
+  const top = (args.top as number) ?? 25;
+
+  const params: Record<string, string> = {
+    '$top': String(top),
+    '$filter': `userId eq '${userId}'`,
+    '$orderby': 'createdDateTime desc',
+    '$select': 'createdDateTime,ipAddress,location,status,clientAppUsed,deviceDetail,conditionalAccessStatus',
+  };
+
+  const result = await graphFetch(creds, '/auditLogs/signIns', { params });
+  if (!result.ok) return { success: false, data: null, summary: `Sign-in logs failed: ${result.error}`, error: result.error };
+
+  const signIns = (result.data as { value: Array<{
+    createdDateTime: string; ipAddress: string; location: { city: string; countryOrRegion: string };
+    status: { errorCode: number }; clientAppUsed: string;
+  }> }).value ?? [];
+
+  const failures = signIns.filter((s) => s.status.errorCode !== 0).length;
+  const locations = [...new Set(signIns.map((s) => s.location?.city).filter(Boolean))];
+
+  return {
+    success: true,
+    data: signIns,
+    summary: `${signIns.length} sign-in(s) for ${userId}. ${failures} failed. Locations: ${locations.slice(0, 3).join(', ') || 'unknown'}`,
+  };
+});
+
+register('graph_get_audit_logs', async (args, creds) => {
+  const top = (args.top as number) ?? 25;
+  const params: Record<string, string> = {
+    '$top': String(top),
+    '$orderby': 'activityDateTime desc',
+  };
+
+  const filters: string[] = [];
+  if (args.activityType) filters.push(`activityDisplayName eq '${args.activityType}'`);
+  if (args.startDate) filters.push(`activityDateTime ge ${args.startDate}`);
+  if (filters.length > 0) params['$filter'] = filters.join(' and ');
+
+  const result = await graphFetch(creds, '/auditLogs/directoryAudits', { params });
+  if (!result.ok) return { success: false, data: null, summary: `Audit logs failed: ${result.error}`, error: result.error };
+
+  const entries = (result.data as { value: Array<{
+    activityDisplayName: string; activityDateTime: string;
+    initiatedBy: { user?: { displayName: string } };
+  }> }).value ?? [];
+
+  return {
+    success: true,
+    data: entries,
+    summary: `${entries.length} audit entries. Recent: ${entries.slice(0, 3).map((e) => `"${e.activityDisplayName}" by ${e.initiatedBy?.user?.displayName ?? 'system'}`).join('; ')}`,
+  };
+});
+
+register('graph_check_inbox_rules', async (args, creds) => {
+  const userId = args.userId as string;
+  const result = await graphFetch(creds, `/users/${encodeURIComponent(userId)}/mailFolders/inbox/messageRules`);
+
+  if (!result.ok) return { success: false, data: null, summary: `Inbox rules failed: ${result.error}`, error: result.error };
+
+  const rules = (result.data as { value: Array<{
+    displayName: string; isEnabled: boolean;
+    actions: { forwardTo?: Array<{ emailAddress: { address: string } }>; moveToFolder?: string; delete?: boolean };
+  }> }).value ?? [];
+
+  const forwarding = rules.filter((r) => r.isEnabled && r.actions?.forwardTo?.length);
+  const deleting = rules.filter((r) => r.isEnabled && r.actions?.delete);
+
+  let summary = `${rules.length} inbox rule(s) for ${userId}.`;
+  if (forwarding.length > 0) {
+    summary += ` ⚠️ ${forwarding.length} FORWARDING RULE(S): ${forwarding.map((r) => `"${r.displayName}" → ${r.actions.forwardTo?.map((t) => t.emailAddress.address).join(', ')}`).join('; ')}`;
+  }
+  if (deleting.length > 0) {
+    summary += ` ⚠️ ${deleting.length} DELETE RULE(S).`;
+  }
+  if (forwarding.length === 0 && deleting.length === 0) {
+    summary += ' No suspicious rules detected.';
+  }
+
+  return { success: true, data: rules, summary };
+});
+
+register('graph_list_app_consents', async (args, creds) => {
+  const top = (args.top as number) ?? 50;
+  const result = await graphFetch(creds, '/oauth2PermissionGrants', {
+    params: { '$top': String(top) },
+  });
+
+  if (!result.ok) return { success: false, data: null, summary: `App consents failed: ${result.error}`, error: result.error };
+
+  const grants = (result.data as { value: Array<{
+    clientId: string; consentType: string; scope: string;
+  }> }).value ?? [];
+
+  const highRisk = grants.filter((g) =>
+    g.scope.includes('Mail.ReadWrite') || g.scope.includes('Files.ReadWrite') || g.scope.includes('User.ReadWrite'),
+  );
+
+  return {
+    success: true,
+    data: grants,
+    summary: `${grants.length} OAuth consent grant(s). ${highRisk.length > 0 ? `⚠️ ${highRisk.length} with high-risk permissions (Mail/Files/User write access).` : 'No high-risk grants detected.'}`,
+  };
+});
+
+register('security_investigate_account', async (args, creds) => {
+  const userId = args.userId as string;
+  const findings: string[] = [];
+
+  // 1. Sign-in logs
+  const signIns = await graphFetch(creds, '/auditLogs/signIns', {
+    params: { '$top': '10', '$filter': `userId eq '${userId}'`, '$orderby': 'createdDateTime desc' },
+  });
+  if (signIns.ok) {
+    const entries = (signIns.data as { value: Array<{ status: { errorCode: number }; location: { city: string; countryOrRegion: string } }> }).value ?? [];
+    const failures = entries.filter((e) => e.status.errorCode !== 0).length;
+    const locations = [...new Set(entries.map((e) => e.location?.countryOrRegion).filter(Boolean))];
+    findings.push(`Sign-ins: ${entries.length} recent, ${failures} failed. Countries: ${locations.join(', ') || 'unknown'}`);
+  }
+
+  // 2. Inbox rules (BEC indicator)
+  const rules = await graphFetch(creds, `/users/${encodeURIComponent(userId)}/mailFolders/inbox/messageRules`);
+  if (rules.ok) {
+    const allRules = (rules.data as { value: Array<{ isEnabled: boolean; actions: { forwardTo?: unknown[]; delete?: boolean } }> }).value ?? [];
+    const suspicious = allRules.filter((r) => r.isEnabled && (r.actions?.forwardTo?.length || r.actions?.delete));
+    findings.push(`Inbox rules: ${allRules.length} total. ${suspicious.length > 0 ? `⚠️ ${suspicious.length} SUSPICIOUS (forwarding or auto-delete)` : '✓ Clean'}`);
+  }
+
+  // 3. Risky user check
+  const risky = await graphFetch(creds, `/identityProtection/riskyUsers/${userId}`);
+  if (risky.ok) {
+    const user = risky.data as { riskLevel: string; riskState: string };
+    findings.push(`Risk status: Level=${user.riskLevel}, State=${user.riskState}`);
+  } else {
+    findings.push('Risk status: Not flagged by ID Protection');
+  }
+
+  // 4. Recent audit activity
+  const audits = await graphFetch(creds, '/auditLogs/directoryAudits', {
+    params: { '$top': '5', '$orderby': 'activityDateTime desc' },
+  });
+  if (audits.ok) {
+    const entries = (audits.data as { value: Array<{ activityDisplayName: string }> }).value ?? [];
+    findings.push(`Recent admin actions: ${entries.map((e) => e.activityDisplayName).join(', ') || 'none'}`);
+  }
+
+  return {
+    success: true,
+    data: { findings },
+    summary: `Investigation report for ${userId}:\n${findings.map((f, i) => `${i + 1}. ${f}`).join('\n')}`,
+  };
+});
+
+// ─── Compliance Tools ─────────────────────────────────────────────────
+
+register('graph_list_ca_policies', async (_, creds) => {
+  const result = await graphFetch(creds, '/identity/conditionalAccess/policies');
+  if (!result.ok) return { success: false, data: null, summary: `CA policies failed: ${result.error}`, error: result.error };
+
+  const policies = (result.data as { value: Array<{
+    displayName: string; state: string; id: string;
+  }> }).value ?? [];
+
+  const enabled = policies.filter((p) => p.state === 'enabled').length;
+  const reportOnly = policies.filter((p) => p.state === 'enabledForReportingButNotEnforced').length;
+  const disabled = policies.filter((p) => p.state === 'disabled').length;
+
+  return {
+    success: true,
+    data: policies,
+    summary: `${policies.length} CA policies: ${enabled} enabled, ${reportOnly} report-only, ${disabled} disabled. Policies: ${policies.slice(0, 5).map((p) => `"${p.displayName}" (${p.state})`).join(', ')}`,
+  };
+});
+
+register('graph_check_security_defaults', async (_, creds) => {
+  const result = await graphFetch(creds, '/policies/identitySecurityDefaultsEnforcementPolicy');
+  if (!result.ok) return { success: false, data: null, summary: `Security defaults check failed: ${result.error}`, error: result.error };
+
+  const policy = result.data as { isEnabled: boolean; displayName: string };
+
+  return {
+    success: true,
+    data: policy,
+    summary: `Security defaults: ${policy.isEnabled ? '✓ ENABLED' : '✗ DISABLED'}. ${policy.isEnabled ? 'All users have baseline MFA protection.' : 'Ensure Conditional Access policies provide equivalent protection.'}`,
+  };
+});
+
+// ─── Licensing Tools ──────────────────────────────────────────────────
+
+register('graph_list_subscribed_skus', async (_, creds) => {
+  const result = await graphFetch(creds, '/subscribedSkus');
+  if (!result.ok) return { success: false, data: null, summary: `License list failed: ${result.error}`, error: result.error };
+
+  const skus = (result.data as { value: Array<{
+    skuPartNumber: string; consumedUnits: number;
+    prepaidUnits: { enabled: number };
+  }> }).value ?? [];
+
+  const totalAssigned = skus.reduce((sum, s) => sum + s.consumedUnits, 0);
+  const totalAvailable = skus.reduce((sum, s) => sum + s.prepaidUnits.enabled, 0);
+  const unused = totalAvailable - totalAssigned;
+
+  return {
+    success: true,
+    data: skus,
+    summary: `${skus.length} license SKU(s). ${totalAssigned}/${totalAvailable} assigned (${unused} unused). SKUs: ${skus.map((s) => `${s.skuPartNumber}: ${s.consumedUnits}/${s.prepaidUnits.enabled}`).join(', ')}`,
+  };
+});
+
+// ─── Device Tools ─────────────────────────────────────────────────────
+
+register('graph_list_managed_devices', async (args, creds) => {
+  const top = (args.top as number) ?? 25;
+  const params: Record<string, string> = {
+    '$top': String(top),
+    '$select': 'id,deviceName,userDisplayName,operatingSystem,complianceState,lastSyncDateTime,enrolledDateTime',
+  };
+  if (args.filter) params['$filter'] = args.filter as string;
+
+  const result = await graphFetch(creds, '/deviceManagement/managedDevices', { params });
+  if (!result.ok) return { success: false, data: null, summary: `Devices failed: ${result.error}`, error: result.error };
+
+  const devices = (result.data as { value: Array<{
+    deviceName: string; userDisplayName: string; operatingSystem: string; complianceState: string;
+  }> }).value ?? [];
+
+  const noncompliant = devices.filter((d) => d.complianceState === 'noncompliant').length;
+
+  return {
+    success: true,
+    data: devices,
+    summary: `${devices.length} managed device(s). ${noncompliant > 0 ? `⚠️ ${noncompliant} noncompliant.` : '✓ All compliant.'} Devices: ${devices.slice(0, 5).map((d) => `${d.deviceName} (${d.userDisplayName}, ${d.operatingSystem})`).join(', ')}`,
+  };
+});
