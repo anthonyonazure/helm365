@@ -1,16 +1,21 @@
 import { route } from '@/agents/router';
-import { processRequest, markExecuted, type GatewayRequest, type GatewayResult } from '@/gateway/gateway';
+import { processRequest, markExecuted, markFailed, type GatewayRequest, type GatewayResult } from '@/gateway/gateway';
 import { createProvider, getModelForMode } from '@/providers';
+import { executeTool } from '@/tools/executor';
 import { useHelmStore } from './store';
+import { useTenantsStore } from './tenants-store';
 import type { Action } from '@/types/gateway';
+// GatewayTier comes from tool definitions, passed through to gateway
 import type { TeamRole } from '@/gateway/permissions';
+import type { GraphCredentials } from './graph-client';
+import { USER_TOOLS } from '@/tools/graph/users';
 
 /**
  * Helm365 Engine — orchestrates the full command flow:
  *
  * 1. User speaks/types command
  * 2. Router classifies intent → picks agent
- * 3. Agent determines tool calls
+ * 3. Match to a registered tool
  * 4. Gateway checks permissions + generates preview
  * 5. Green: auto-execute. Yellow/Red: queue for approval.
  * 6. Execute tool calls against Graph API
@@ -26,8 +31,63 @@ export interface CommandResult {
   error?: string;
 }
 
+// Tool registry — all tools across all agents
+const ALL_TOOLS = [...USER_TOOLS];
+
+/**
+ * Match parsed intent to a specific tool from the registry.
+ */
+function matchTool(intent: string, agent: string, action?: string) {
+  const agentTools = ALL_TOOLS.filter((t) => t.agent === agent);
+
+  // Direct action mapping
+  const actionToolMap: Record<string, string> = {
+    reset_password: 'graph_reset_password',
+    reset_mfa: 'graph_reset_mfa',
+    unlock: 'graph_unlock_account',
+    unblock: 'graph_unlock_account',
+    create_user: 'graph_create_user',
+    disable: 'graph_disable_user',
+    delete_user: 'graph_delete_user',
+    assign_license: 'graph_assign_license',
+    remove_license: 'graph_remove_license',
+    add_group: 'graph_add_group_member',
+    remove_group: 'graph_remove_group_member',
+  };
+
+  if (action && actionToolMap[action]) {
+    const tool = agentTools.find((t) => t.name === actionToolMap[action]);
+    if (tool) return tool;
+  }
+
+  // Keyword matching in intent
+  const lower = intent.toLowerCase();
+  if (lower.includes('reset') && lower.includes('mfa')) return agentTools.find((t) => t.name === 'graph_reset_mfa');
+  if (lower.includes('reset') && lower.includes('password')) return agentTools.find((t) => t.name === 'graph_reset_password');
+  if (lower.includes('unlock') || lower.includes('unblock')) return agentTools.find((t) => t.name === 'graph_unlock_account');
+  if (lower.includes('onboard') || lower.includes('create user') || lower.includes('new user') || lower.includes('new hire')) return agentTools.find((t) => t.name === 'graph_create_user');
+  if (lower.includes('offboard') || lower.includes('disable')) return agentTools.find((t) => t.name === 'graph_disable_user');
+  if (lower.includes('delete user') || lower.includes('remove user')) return agentTools.find((t) => t.name === 'graph_delete_user');
+  if (lower.includes('license') && lower.includes('assign')) return agentTools.find((t) => t.name === 'graph_assign_license');
+  if (lower.includes('search') || lower.includes('find') || lower.includes('look up') || lower.includes('show me')) return agentTools.find((t) => t.name === 'graph_search_users');
+  if (lower.includes('group') && lower.includes('add')) return agentTools.find((t) => t.name === 'graph_add_group_member');
+  if (lower.includes('group') && lower.includes('remove')) return agentTools.find((t) => t.name === 'graph_remove_group_member');
+
+  // Default: search users (read-only, safe)
+  return agentTools.find((t) => t.name === 'graph_search_users') ?? agentTools[0];
+}
+
+/**
+ * Get Graph API credentials for the active tenant.
+ */
+function getTenantCredentials(tenantConnectionId: string): GraphCredentials | null {
+  const creds = JSON.parse(localStorage.getItem('helm365-creds') ?? '{}');
+  return creds[tenantConnectionId] ?? null;
+}
+
 export async function executeCommand(input: string): Promise<CommandResult> {
   const store = useHelmStore.getState();
+  const tenantsStore = useTenantsStore.getState();
 
   // Create AI provider if configured (keyword routing works without one)
   let provider = null;
@@ -49,22 +109,33 @@ export async function executeCommand(input: string): Promise<CommandResult> {
     // 1. Route — uses AI if available, keyword fallback otherwise
     const parsed = await route(input, provider, model);
 
-    // 3. For now, create a simulated gateway request
-    //    (Full implementation will have agents select specific tools)
+    // 2. Match to a specific tool
+    const tool = matchTool(input, parsed.agent, parsed.entities.action);
+    // Tool tier is used by the gateway request through tool.tier
+
+    // 3. Resolve tenant
+    const activeTenant = store.activeTenantId
+      ? tenantsStore.getConnection(store.activeTenantId)
+      : null;
+
+    const tenantName = parsed.entities.tenant ?? activeTenant?.tenantName ?? 'No tenant';
+    const tenantDomain = activeTenant?.tenantDomain ?? 'demo.onmicrosoft.com';
+
+    // 4. Build gateway request
     const gatewayRequest: GatewayRequest = {
       intent: input,
       agent: parsed.agent,
-      tool: {
-        name: `${parsed.agent}_${parsed.entities.action ?? 'query'}`,
+      tool: tool ?? {
+        name: `${parsed.agent}_query`,
         description: parsed.intent,
         parameters: { type: 'object', properties: {} },
-        tier: 'green', // Router doesn't know tier yet — agent will classify
+        tier: 'green',
         agent: parsed.agent,
       },
       arguments: parsed.entities as Record<string, unknown>,
       tenantConnectionId: store.activeTenantId ?? 'demo',
-      tenantName: parsed.entities.tenant ?? store.activeTenantName ?? 'No tenant',
-      tenantDomain: parsed.entities.tenant ? `${parsed.entities.tenant.toLowerCase().replace(/\s+/g, '')}.onmicrosoft.com` : 'demo.onmicrosoft.com',
+      tenantName,
+      tenantDomain,
       userId: 'current-user',
       userEmail: 'admin@helm365.io',
       userRole: 'admin' as TeamRole,
@@ -75,10 +146,10 @@ export async function executeCommand(input: string): Promise<CommandResult> {
       aiTokensUsed: 0,
     };
 
-    // 4. Process through gateway
+    // 5. Process through gateway
     const gatewayResult: GatewayResult = processRequest(gatewayRequest);
 
-    // 5. Add to store
+    // 6. Add to store
     store.addAction(gatewayResult.action);
 
     if (!gatewayResult.allowed) {
@@ -100,9 +171,50 @@ export async function executeCommand(input: string): Promise<CommandResult> {
       };
     }
 
-    // 6. Auto-approved (GREEN tier) — execute
-    //    (In production, this calls Graph API. For now, simulate.)
-    const result = `Routed to ${parsed.agent} agent (confidence: ${(parsed.confidence * 100).toFixed(0)}%). Intent: ${parsed.intent}`;
+    // 7. Auto-approved (GREEN tier) — execute for real if tenant is connected
+    const credentials = store.activeTenantId ? getTenantCredentials(store.activeTenantId) : null;
+
+    if (credentials && tool) {
+      // Real execution against Graph API
+      const execResult = await executeTool({
+        toolName: tool.name,
+        arguments: parsed.entities as Record<string, unknown>,
+        credentials,
+      });
+
+      if (execResult.success) {
+        markExecuted(gatewayResult.action, execResult.summary, execResult.rollbackData);
+        store.updateAction(gatewayResult.action.id, {
+          status: 'executed',
+          result: execResult.summary,
+          rollbackData: execResult.rollbackData ?? null,
+        });
+
+        return {
+          success: true,
+          message: execResult.summary,
+          action: gatewayResult.action,
+          agent: parsed.agent,
+        };
+      } else {
+        markFailed(gatewayResult.action, execResult.error ?? 'Unknown error');
+        store.updateAction(gatewayResult.action.id, {
+          status: 'failed',
+          result: execResult.summary,
+        });
+
+        return {
+          success: false,
+          message: execResult.summary,
+          action: gatewayResult.action,
+          agent: parsed.agent,
+          error: execResult.error,
+        };
+      }
+    }
+
+    // No tenant connected — simulate
+    const result = `[Demo] Routed to ${parsed.agent} agent → ${tool?.name ?? 'unknown tool'} (confidence: ${(parsed.confidence * 100).toFixed(0)}%). Connect a tenant to execute for real.`;
     markExecuted(gatewayResult.action, result);
     store.updateAction(gatewayResult.action.id, { status: 'executed', result });
 
