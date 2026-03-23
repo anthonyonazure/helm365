@@ -1,8 +1,9 @@
 import { useEffect } from 'react';
 import { Outlet, NavLink, useLocation } from 'react-router-dom';
 import { CommandBar } from '../components/CommandBar';
-import { Ship, LayoutDashboard, MessageSquare, Activity, Shield, HardDrive, Settings, Moon, Sun, Bell } from 'lucide-react';
+import { Ship, LayoutDashboard, MessageSquare, Activity, Shield, HardDrive, Settings, Moon, Sun, Bell, LogOut } from 'lucide-react';
 import { useHelmStore } from '@/lib/store';
+import { useAuth } from '@/lib/auth';
 
 const NAV_ITEMS = [
   { label: 'Dashboard', path: '/', icon: LayoutDashboard },
@@ -16,6 +17,7 @@ const NAV_ITEMS = [
 export function AppLayout() {
   const pendingCount = useHelmStore((s) => s.pendingCount);
   const activeTenantName = useHelmStore((s) => s.activeTenantName);
+  const { user, signOut } = useAuth();
   const location = useLocation();
 
   // Dark mode toggle
@@ -96,6 +98,12 @@ export function AppLayout() {
       <div className="flex-1 flex overflow-hidden">
         {/* Sidebar nav */}
         <nav className="w-14 border-r bg-card flex flex-col items-center py-2 gap-1 shrink-0">
+          {/* User avatar */}
+          <div className="mb-2 pb-2 border-b w-full flex justify-center" title={user?.email ?? ''}>
+            <div className="h-7 w-7 rounded-full bg-helm-500 text-white flex items-center justify-center text-xs font-bold">
+              {user?.email?.charAt(0).toUpperCase() ?? '?'}
+            </div>
+          </div>
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             const isActive = item.path === '/'
@@ -117,6 +125,16 @@ export function AppLayout() {
               </NavLink>
             );
           })}
+          {/* Sign out at bottom */}
+          <div className="mt-auto pt-2 border-t w-full flex justify-center">
+            <button
+              onClick={signOut}
+              title="Sign out"
+              className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted"
+            >
+              <LogOut className="h-5 w-5" />
+            </button>
+          </div>
         </nav>
 
         {/* Main content */}
