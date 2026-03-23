@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Check, Eye, EyeOff, Zap, Brain, Microscope } from 'lucide-react';
 import { useHelmStore } from '@/lib/store';
+import { useAuth } from '@/lib/auth';
 import { PROVIDER_CONFIGS, type ProviderId } from '@/types/providers';
 import { toast } from 'sonner';
 
@@ -19,7 +20,8 @@ export function SettingsView() {
 }
 
 function AIProviderSection() {
-  const { activeProvider, providerKeys, setProvider, setProviderKey } = useHelmStore();
+  const { activeProvider, providerKeys, setProvider, setProviderKey, saveProviderToDb } = useHelmStore();
+  const teamId = useAuth().teamId;
   const [editingProvider, setEditingProvider] = useState<ProviderId | null>(null);
   const [keyInput, setKeyInput] = useState('');
   const [showKey, setShowKey] = useState(false);
@@ -27,11 +29,15 @@ function AIProviderSection() {
   const handleSaveKey = async (providerId: ProviderId) => {
     if (!keyInput.trim()) return;
 
-    // Save the key directly — validation via browser fetch fails due to CORS
-    // (Anthropic, OpenAI, etc. don't allow browser-origin requests).
-    // The key will be validated on first real use through the Vite proxy.
+    // Save to local state immediately
     setProviderKey(providerId, keyInput.trim());
     setProvider(providerId);
+
+    // Save to Supabase if logged in
+    if (teamId) {
+      await saveProviderToDb(teamId, providerId, keyInput.trim());
+    }
+
     toast.success(`${PROVIDER_CONFIGS.find((p) => p.id === providerId)?.name} connected`);
     setEditingProvider(null);
     setKeyInput('');

@@ -9,19 +9,30 @@ import { TenantsView } from './ui/views/TenantsView';
 import { SettingsView } from './ui/views/SettingsView';
 import { LoginView } from './ui/views/LoginView';
 import { useAuth } from './lib/auth';
+import { useHelmStore } from './lib/store';
+import { useTenantsStore } from './lib/tenants-store';
 import { Loader2 } from 'lucide-react';
 
 // Register all AI providers
 import './providers';
 
 export default function App() {
-  const { user, initialized, initialize } = useAuth();
+  const { user, teamId, initialized, initialize } = useAuth();
+  const loadProviders = useHelmStore((s) => s.loadProvidersFromDb);
+  const loadTenants = useTenantsStore((s) => s.loadFromDb);
 
   useEffect(() => {
     initialize();
   }, [initialize]);
 
-  // Loading state while checking auth
+  // Load data from Supabase when team is available
+  useEffect(() => {
+    if (teamId) {
+      loadProviders(teamId);
+      loadTenants(teamId);
+    }
+  }, [teamId, loadProviders, loadTenants]);
+
   if (!initialized) {
     return (
       <div className="h-screen w-screen flex items-center justify-center bg-background">
@@ -30,12 +41,10 @@ export default function App() {
     );
   }
 
-  // Not logged in — show login
   if (!user) {
     return <LoginView />;
   }
 
-  // Logged in — show app
   return (
     <Routes>
       <Route element={<AppLayout />}>

@@ -21,11 +21,11 @@ export interface CommandResult {
 }
 
 /**
- * Get Graph API credentials for the active tenant.
+ * Get Graph API credentials for the active tenant from Supabase.
  */
-function getTenantCredentials(tenantConnectionId: string): GraphCredentials | null {
-  const creds = JSON.parse(localStorage.getItem('helm365-creds') ?? '{}');
-  return creds[tenantConnectionId] ?? null;
+async function getTenantCredentials(tenantConnectionId: string): Promise<GraphCredentials | null> {
+  const { dbGetTenantCredentials } = await import('./db');
+  return dbGetTenantCredentials(tenantConnectionId);
 }
 
 /**
@@ -104,7 +104,7 @@ export async function executeCommand(input: string): Promise<CommandResult> {
       : null;
     const tenantName = parsed.entities.tenant ?? activeTenant?.tenantName ?? 'No tenant';
     const tenantDomain = activeTenant?.tenantDomain ?? 'demo.onmicrosoft.com';
-    const credentials = store.activeTenantId ? getTenantCredentials(store.activeTenantId) : null;
+    const credentials = store.activeTenantId ? await getTenantCredentials(store.activeTenantId) : null;
 
     // 3. Get agent config
     const agentConfig = getAgentConfig(parsed.agent);

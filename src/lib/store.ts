@@ -3,13 +3,14 @@ import { persist } from 'zustand/middleware';
 import type { ProviderId } from '@/types/providers';
 import type { ProcessingMode } from '@/providers/adapter';
 import type { Action } from '@/types/gateway';
+import { dbGetProviderConfigs, dbSaveProviderConfig, dbGetActiveProvider } from './db';
 
 interface HelmState {
   // AI Provider config
   activeProvider: ProviderId | null;
   activeModel: string | null;
   processingMode: ProcessingMode;
-  providerKeys: Partial<Record<ProviderId, string>>; // Stored locally until Supabase Vault is set up
+  providerKeys: Partial<Record<ProviderId, string>>;
 
   // Tenant context
   activeTenantId: string | null;
@@ -28,6 +29,8 @@ interface HelmState {
   // Actions
   setProvider: (provider: ProviderId, model?: string) => void;
   setProviderKey: (provider: ProviderId, key: string) => void;
+  saveProviderToDb: (teamId: string, provider: ProviderId, apiKey: string, model?: string) => Promise<void>;
+  loadProvidersFromDb: (teamId: string) => Promise<void>;
   setProcessingMode: (mode: ProcessingMode) => void;
   setActiveTenant: (id: string | null, name: string | null) => void;
   addAction: (action: Action) => void;
@@ -40,7 +43,6 @@ interface HelmState {
 export const useHelmStore = create<HelmState>()(
   persist(
     (set) => ({
-      // Defaults
       activeProvider: null,
       activeModel: null,
       processingMode: 'smart',
@@ -61,6 +63,36 @@ export const useHelmStore = create<HelmState>()(
         set((state) => ({
           providerKeys: { ...state.providerKeys, [provider]: key },
         })),
+
+      saveProviderToDb: async (teamId, provider, apiKey, model) => {
+        await dbSaveProviderConfig(teamId, {
+          provider,
+          apiKey,
+          defaultModel: model,
+          isDefault: true,
+        });
+        set((state) => ({
+          activeProvider: provider,
+          activeModel: model ?? null,
+          providerKeys: { ...state.providerKeys, [provider]: apiKey },
+        }));
+      },
+
+      loadProvidersFromDb: async (teamId) => {
+        const configs = await dbGetProviderConfigs(teamId);
+        const keys: Partial<Record<ProviderId, string>> = {};
+        for (const c of configs) {
+          keys[c.provider as ProviderId] = c.api_key_ref;
+        }
+
+        const active = await dbGetActiveProvider(teamId);
+
+        set({
+          providerKeys: keys,
+          activeProvider: active ? (active.provider as ProviderId) : null,
+          activeModel: active?.default_model ?? null,
+        });
+      },
 
       setProcessingMode: (mode) => set({ processingMode: mode }),
 
@@ -98,9 +130,9 @@ export const useHelmStore = create<HelmState>()(
         activeProvider: state.activeProvider,
         activeModel: state.activeModel,
         processingMode: state.processingMode,
-        providerKeys: state.providerKeys,
         activeTenantId: state.activeTenantId,
         activeTenantName: state.activeTenantName,
+        // providerKeys NOT persisted to localStorage anymore — comes from Supabase
       }),
     },
   ),

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Plus, Trash2, RefreshCw, Loader2, CheckCircle, XCircle, HardDrive } from 'lucide-react';
 import { useTenantsStore } from '@/lib/tenants-store';
 import { useHelmStore } from '@/lib/store';
+import { useAuth } from '@/lib/auth';
 import { testConnection, clearTokenCache } from '@/lib/graph-client';
 import type { TenantConnection, HealthStatus } from '@/types/tenants';
 import { toast } from 'sonner';
@@ -133,6 +134,7 @@ export function TenantsView() {
 function ConnectionWizard({ onClose }: { onClose: () => void }) {
   const { addConnection } = useTenantsStore();
   const { setActiveTenant } = useHelmStore();
+  const { teamId } = useAuth();
   const [tenantId, setTenantId] = useState('');
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
@@ -167,31 +169,24 @@ function ConnectionWizard({ onClose }: { onClose: () => void }) {
     }
   };
 
-  const handleSave = () => {
-    if (!testResult?.success) return;
+  const handleSave = async () => {
+    if (!testResult?.success || !teamId) return;
 
-    const connection: TenantConnection = {
-      id: crypto.randomUUID(),
-      teamId: 'default-team',
+    // Save to Supabase
+    const connection = await addConnection(teamId, {
       tenantId,
       tenantName: testResult.tenantName ?? 'Unknown',
       tenantDomain: testResult.tenantDomain ?? `${tenantId}.onmicrosoft.com`,
       clientId,
-      authMethod: 'client_credentials',
-      healthStatus: 'healthy',
-      lastHealthCheck: new Date().toISOString(),
-      createdAt: new Date().toISOString(),
-    };
+      clientSecret,
+    });
 
-    addConnection(connection);
-    setActiveTenant(connection.id, connection.tenantName);
-
-    // Store credentials (in localStorage for now — Supabase Vault later)
-    const creds = JSON.parse(localStorage.getItem('helm365-creds') ?? '{}');
-    creds[connection.id] = { tenantId, clientId, clientSecret };
-    localStorage.setItem('helm365-creds', JSON.stringify(creds));
-
-    toast.success(`${connection.tenantName} saved and set as active tenant`);
+    if (connection) {
+      setActiveTenant(connection.id, connection.tenantName);
+      toast.success(`${connection.tenantName} saved and set as active tenant`);
+    } else {
+      toast.error('Failed to save tenant connection');
+    }
     onClose();
   };
 
