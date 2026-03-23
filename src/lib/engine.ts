@@ -111,7 +111,7 @@ export async function executeCommand(input: string): Promise<CommandResult> {
 
     // 4. If AI provider is available, let the agent decide which tool to call
     let selectedTool: AgentTool | undefined;
-    let toolArgs: Record<string, unknown> = parsed.entities as Record<string, unknown>;
+    let toolArgs: Record<string, unknown> = {};
     let agentResponse = '';
 
     if (aiProvider && model) {
@@ -141,6 +141,8 @@ export async function executeCommand(input: string): Promise<CommandResult> {
     // Fall back to keyword matching if AI didn't select a tool
     if (!selectedTool) {
       selectedTool = matchToolByKeyword(input, parsed.agent, parsed.entities.action);
+      // Build tool arguments from parsed entities + raw input
+      toolArgs = buildToolArgs(input, selectedTool?.name, parsed.entities);
     }
 
     // 5. Build gateway request
@@ -237,6 +239,121 @@ export async function executeCommand(input: string): Promise<CommandResult> {
   }
 }
 
+/**
+ * Build proper tool arguments from the user's natural language input.
+ * Maps user intent to the specific parameters each tool expects.
+ */
+function buildToolArgs(
+  input: string,
+  toolName: string | undefined,
+  entities: { tenant?: string; users?: string[]; action?: string; extras?: Record<string, string> },
+): Record<string, unknown> {
+  const lower = input.toLowerCase();
+
+  switch (toolName) {
+    case 'graph_search_users': {
+      // Extract the search term — what comes after "search/find/show" and before "at/in/for"
+      const searchMatch = input.match(/(?:search|find|show|look up|list)\s+(?:me\s+)?(?:users?\s+)?(?:named?\s+)?(.+?)(?:\s+(?:at|in|for|from)\s+|$)/i);
+      const search = searchMatch?.[1]?.trim() ?? entities.users?.[0] ?? '';
+      return search ? { search, top: 25 } : { search: '*', top: 25 };
+    }
+    case 'graph_reset_mfa':
+    case 'graph_reset_password':
+    case 'graph_unlock_account':
+    case 'graph_disable_user':
+    case 'graph_get_user':
+    case 'graph_get_sign_in_logs': {
+      const userId = entities.users?.[0] ?? extractUserFromInput(input);
+      return userId ? { userId } : {};
+    }
+    case 'graph_check_inbox_rules': {
+      const userId = entities.users?.[0] ?? extractUserFromInput(input);
+      return userId ? { userId } : {};
+    }
+    case 'security_investigate_account': {
+      const userId = entities.users?.[0] ?? extractUserFromInput(input);
+      return { userId: userId ?? 'unknown', reason: input };
+    }
+    case 'exchange_block_sender':
+    case 'exchange_allow_sender': {
+      // Extract email or domain
+      const emailMatch = input.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+      const domainMatch = input.match(/(?:domain\s+)?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+      return { entry: emailMatch?.[1] ?? domainMatch?.[1] ?? '', notes: input };
+    }
+    case 'graph_message_trace': {
+      const emailMatch = input.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+      return emailMatch ? { senderAddress: emailMatch[1] } : {};
+    }
+    case 'graph_set_email_forwarding': {
+      const emails = [...input.matchAll(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/g)].map((m) => m[1]);
+      return { userId: emails[0] ?? '', forwardTo: emails[1] ?? '' };
+    }
+    case 'compliance_run_assessment': {
+      let framework = 'cis-m365';
+      if (lower.includes('cmmc') && lower.includes('2')) framework = 'cmmc-l2';
+      else if (lower.includes('cmmc')) framework = 'cmmc-l1';
+      else if (lower.includes('nist')) framework = 'nist-800-171';
+      else if (lower.includes('hipaa')) framework = 'hipaa';
+      else if (lower.includes('soc')) framework = 'soc2';
+      return { framework };
+    }
+    case 'graph_list_risky_users':
+    case 'graph_list_risky_signins':
+    case 'graph_list_security_alerts':
+    case 'graph_get_secure_score':
+    case 'graph_list_ca_policies':
+    case 'graph_check_security_defaults':
+    case 'graph_list_subscribed_skus':
+    case 'graph_list_managed_devices':
+    case 'graph_list_noncompliant_devices':
+    case 'graph_list_compliance_policies':
+    case 'graph_list_config_profiles':
+    case 'graph_list_apps':
+    case 'graph_list_mailboxes':
+    case 'graph_list_app_consents':
+    case 'graph_get_secure_score_profiles':
+    case 'graph_list_auth_methods_policy':
+    case 'graph_get_directory_settings':
+    case 'licensing_run_audit':
+    case 'graph_copilot_readiness':
+    case 'report_tenant_health':
+    case 'report_executive_summary':
+    case 'report_security_posture':
+    case 'report_user_activity':
+    case 'report_license_usage':
+    case 'policy_list_templates':
+    case 'policy_get_drift_status':
+    case 'policy_list_backups':
+      // These tools don't need user-specific arguments
+      return {};
+    default:
+      // Pass through whatever entities we have, filtering out undefined
+      return Object.fromEntries(
+        Object.entries(entities).filter(([, v]) => v !== undefined && v !== null),
+      );
+  }
+}
+
+/**
+ * Extract a user name or email from raw input text.
+ */
+function extractUserFromInput(input: string): string | undefined {
+  // Try email first
+  const emailMatch = input.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+  if (emailMatch) return emailMatch[1];
+
+  // Try "for <Name>" pattern
+  const forMatch = input.match(/(?:for|user)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/);
+  if (forMatch) return forMatch[1];
+
+  // Try "<Name>'s" pattern
+  const possessiveMatch = input.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)'s/);
+  if (possessiveMatch) return possessiveMatch[1];
+
+  return undefined;
+}
+
 // ─── Keyword fallback (no AI) ────────────────────────────────────────
 
 function matchToolByKeyword(intent: string, agent: string, action?: string): AgentTool | undefined {
@@ -272,6 +389,7 @@ function matchToolByKeyword(intent: string, agent: string, action?: string): Age
   if (lower.includes('spam')) return allTools.find((t) => t.name === 'exchange_block_sender');
 
   // Security
+  if (lower.includes('without mfa') || lower.includes('no mfa') || lower.includes('mfa status') || lower.includes('mfa coverage')) return allTools.find((t) => t.name === 'report_security_posture');
   if (lower.includes('secure score')) return allTools.find((t) => t.name === 'graph_get_secure_score');
   if (lower.includes('investigate') || lower.includes('compromised')) return allTools.find((t) => t.name === 'security_investigate_account');
   if (lower.includes('risky')) return allTools.find((t) => t.name === 'graph_list_risky_users');
