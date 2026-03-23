@@ -31,24 +31,85 @@ export function TenantsView() {
       {connections.length === 0 && !showWizard && (
         <div className="border rounded-lg p-6 space-y-4">
           <h2 className="font-semibold">Connect your first M365 tenant</h2>
-          <div className="text-sm text-muted-foreground space-y-2">
-            <p>Before connecting, you'll need an Azure AD app registration with the following:</p>
+          <div className="text-sm text-muted-foreground space-y-3">
+            <p>Before connecting, you'll need an Azure AD app registration:</p>
             <ol className="list-decimal list-inside space-y-1 ml-2">
               <li>Go to <strong>Entra ID &gt; App registrations &gt; New registration</strong></li>
-              <li>Name it "Helm365" (or whatever you prefer)</li>
-              <li>Set to <strong>Single tenant</strong> (or Multitenant for MSP/GDAP)</li>
-              <li>Add <strong>API permissions</strong>: User.ReadWrite.All, Group.ReadWrite.All, Directory.ReadWrite.All, Mail.ReadWrite (Application type, not Delegated)</li>
-              <li>Grant <strong>admin consent</strong></li>
-              <li>Create a <strong>client secret</strong> under Certificates &amp; Secrets</li>
-              <li>Copy the <strong>Application (client) ID</strong>, <strong>Directory (tenant) ID</strong>, and <strong>client secret value</strong></li>
+              <li>Name it "Helm365" — set to <strong>Single tenant</strong> (or Multitenant for MSP/GDAP)</li>
+              <li>Add the <strong>API permissions</strong> below (all <strong>Application</strong> type, not Delegated)</li>
+              <li>Click <strong>Grant admin consent</strong></li>
+              <li>Go to <strong>Certificates &amp; Secrets</strong> → create a <strong>client secret</strong></li>
+              <li>Copy: <strong>Application (client) ID</strong>, <strong>Directory (tenant) ID</strong>, and <strong>client secret value</strong></li>
             </ol>
+            <details className="mt-2">
+              <summary className="cursor-pointer font-medium text-foreground">Required API Permissions (30)</summary>
+              <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-0.5 text-xs font-mono">
+                <div className="font-sans font-medium text-foreground mt-2 col-span-full">Identity &amp; Directory</div>
+                <span>User.Read.All</span>
+                <span>User.ReadWrite.All</span>
+                <span>UserAuthenticationMethod.ReadWrite.All</span>
+                <span>Group.Read.All</span>
+                <span>GroupMember.ReadWrite.All</span>
+                <span>Directory.Read.All</span>
+                <span>Organization.Read.All</span>
+
+                <div className="font-sans font-medium text-foreground mt-2 col-span-full">Mail &amp; Exchange</div>
+                <span>Mail.Read</span>
+                <span>Mail.ReadWrite</span>
+                <span>MailboxSettings.Read</span>
+                <span>MailboxSettings.ReadWrite</span>
+
+                <div className="font-sans font-medium text-foreground mt-2 col-span-full">Security &amp; Compliance</div>
+                <span>Policy.Read.All</span>
+                <span>Policy.ReadWrite.ConditionalAccess</span>
+                <span>SecurityEvents.Read.All</span>
+                <span>SecurityAlert.Read.All</span>
+                <span>AuditLog.Read.All</span>
+                <span>IdentityRiskyUser.Read.All</span>
+                <span>IdentityRiskyUser.ReadWrite.All</span>
+                <span>DelegatedPermissionGrant.ReadWrite.All</span>
+                <span>Reports.Read.All</span>
+
+                <div className="font-sans font-medium text-foreground mt-2 col-span-full">Email Security</div>
+                <span>ThreatSubmission.Read.All</span>
+                <span>ThreatSubmission.ReadWrite.All</span>
+                <span>ThreatPolicy.ReadWrite.All</span>
+
+                <div className="font-sans font-medium text-foreground mt-2 col-span-full">Device Management (Intune)</div>
+                <span>DeviceManagementManagedDevices.Read.All</span>
+                <span>DeviceManagementManagedDevices.ReadWrite.All</span>
+                <span>DeviceManagementManagedDevices.PrivilegedOperations.All</span>
+                <span>DeviceManagementConfiguration.Read.All</span>
+                <span>DeviceManagementConfiguration.ReadWrite.All</span>
+                <span>DeviceManagementApps.Read.All</span>
+                <span>DeviceManagementApps.ReadWrite.All</span>
+              </div>
+            </details>
           </div>
-          <button
-            onClick={() => setShowWizard(true)}
-            className="bg-helm-600 text-white px-4 py-2 rounded-lg hover:bg-helm-700 text-sm font-medium"
-          >
-            I have my credentials — Connect now
-          </button>
+          <div className="flex flex-wrap gap-3">
+            <button
+              onClick={() => setShowWizard(true)}
+              className="bg-helm-600 text-white px-4 py-2 rounded-lg hover:bg-helm-700 text-sm font-medium"
+            >
+              I have my credentials — Connect now
+            </button>
+            <details className="text-xs">
+              <summary className="cursor-pointer text-helm-600 hover:text-helm-700 font-medium py-2">
+                Automate with Azure CLI
+              </summary>
+              <div className="mt-2 bg-muted rounded-lg p-3 font-mono text-[11px] space-y-1">
+                <p className="font-sans text-muted-foreground">Run this in your terminal (requires <code>az login</code> first):</p>
+                <pre className="overflow-x-auto whitespace-pre">
+{`# Single tenant:
+./scripts/register-app.sh
+
+# MSP / Multi-tenant:
+./scripts/register-app.sh --multi-tenant`}
+                </pre>
+                <p className="font-sans text-muted-foreground">Creates app registration with all 30 permissions, grants admin consent, and outputs the credentials.</p>
+              </div>
+            </details>
+          </div>
         </div>
       )}
 
