@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Plus, Trash2, RefreshCw, Loader2, CheckCircle, XCircle, HardDrive } from 'lucide-react';
 import { useTenantsStore } from '@/lib/tenants-store';
 import { useHelmStore } from '@/lib/store';
-import { testConnection } from '@/lib/graph-client';
+import { testConnection, clearTokenCache } from '@/lib/graph-client';
 import type { TenantConnection, HealthStatus } from '@/types/tenants';
 import { toast } from 'sonner';
 
@@ -152,6 +152,9 @@ function ConnectionWizard({ onClose }: { onClose: () => void }) {
 
     setTesting(true);
     setTestResult(null);
+
+    // Clear any cached token so we get a fresh one with current permissions
+    clearTokenCache(tenantId, clientId);
 
     const result = await testConnection({ tenantId, clientId, clientSecret });
     setTestResult(result);
