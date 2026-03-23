@@ -1,11 +1,14 @@
 /**
  * Microsoft Graph API client.
- * Handles token acquisition, request building, retry with backoff on throttle (429).
- * No SDK dependency — raw fetch against REST endpoints.
+ * In dev, routes through Vite proxy (/api/ms-token and /api/graph) to avoid CORS.
+ * In production, routes through Supabase Edge Functions.
  */
 
-const GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
-const TOKEN_URL = 'https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token';
+const isDev = typeof window !== 'undefined' && window.location?.hostname === 'localhost';
+
+// In dev: proxy through Vite. In prod: direct (via Edge Function).
+const GRAPH_BASE = isDev ? '/api/graph' : 'https://graph.microsoft.com/v1.0';
+const TOKEN_ENDPOINT = isDev ? '/api/ms-token' : null; // Prod uses Edge Function
 
 export interface GraphCredentials {
   tenantId: string;
@@ -15,43 +18,46 @@ export interface GraphCredentials {
 
 export interface GraphToken {
   accessToken: string;
-  expiresAt: number; // Unix timestamp
+  expiresAt: number;
 }
 
-// Token cache per tenant
 const tokenCache = new Map<string, GraphToken>();
 
 /**
- * Get an access token for a tenant using client credentials flow.
- * Caches tokens and refreshes 5 minutes before expiry.
+ * Get an access token via the dev proxy (avoids CORS on login.microsoftonline.com).
  */
 export async function getAccessToken(creds: GraphCredentials): Promise<string> {
   const cacheKey = `${creds.tenantId}:${creds.clientId}`;
   const cached = tokenCache.get(cacheKey);
 
-  // Return cached token if still valid (with 5-min buffer)
   if (cached && cached.expiresAt > Date.now() + 5 * 60_000) {
     return cached.accessToken;
   }
 
-  const tokenUrl = TOKEN_URL.replace('{tenantId}', creds.tenantId);
+  if (!TOKEN_ENDPOINT) {
+    throw new Error('Token acquisition not available in this environment');
+  }
 
-  const body = new URLSearchParams({
-    grant_type: 'client_credentials',
-    client_id: creds.clientId,
-    client_secret: creds.clientSecret,
-    scope: 'https://graph.microsoft.com/.default',
-  });
-
-  const res = await fetch(tokenUrl, {
+  const res = await fetch(TOKEN_ENDPOINT, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: body.toString(),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      tenantId: creds.tenantId,
+      clientId: creds.clientId,
+      clientSecret: creds.clientSecret,
+    }),
   });
 
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(`Token acquisition failed (${res.status}): ${err}`);
+    let errorMessage = `Token acquisition failed (${res.status})`;
+    try {
+      const errorJson = JSON.parse(err);
+      errorMessage = errorJson.error_description ?? errorJson.error ?? errorMessage;
+    } catch {
+      errorMessage = err || errorMessage;
+    }
+    throw new Error(errorMessage);
   }
 
   const data = await res.json();
@@ -67,6 +73,7 @@ export async function getAccessToken(creds: GraphCredentials): Promise<string> {
 
 /**
  * Make a Graph API request with automatic retry on throttle.
+ * In dev, requests go through /api/graph Vite proxy.
  */
 export async function graphFetch(
   creds: GraphCredentials,
@@ -92,12 +99,16 @@ export async function graphFetch(
     'Content-Type': 'application/json',
   };
 
+  // Forward ConsistencyLevel if present in params
+  if (params?.['ConsistencyLevel']) {
+    headers['ConsistencyLevel'] = params['ConsistencyLevel'];
+  }
+
   const fetchOptions: RequestInit = { method, headers };
   if (body && method !== 'GET') {
     fetchOptions.body = JSON.stringify(body);
   }
 
-  // Retry up to 3 times on throttle (429)
   for (let attempt = 0; attempt < 3; attempt++) {
     const res = await fetch(url, fetchOptions);
 
@@ -120,7 +131,6 @@ export async function graphFetch(
       return { ok: false, status: res.status, data: null, error: errorMessage };
     }
 
-    // 204 No Content (e.g., DELETE responses)
     if (res.status === 204) {
       return { ok: true, status: 204, data: null };
     }
@@ -133,7 +143,7 @@ export async function graphFetch(
 }
 
 /**
- * Test connection to a tenant — verifies credentials work.
+ * Test connection to a tenant.
  */
 export async function testConnection(creds: GraphCredentials): Promise<{
   success: boolean;
@@ -174,9 +184,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/**
- * Clear cached token for a tenant (e.g., when credentials change).
- */
 export function clearTokenCache(tenantId: string, clientId: string) {
   tokenCache.delete(`${tenantId}:${clientId}`);
 }
