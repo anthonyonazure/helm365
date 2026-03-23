@@ -90,6 +90,65 @@ function msAuthProxy(): Plugin {
           res.end(JSON.stringify({ error: err.message }));
         }
       });
+      // Generic AI provider proxy — forwards requests to any AI API
+      server.middlewares.use('/api/ai-proxy', async (req, res) => {
+        const targetUrl = decodeURIComponent(req.url?.slice(1) ?? '');
+        if (!targetUrl || !targetUrl.startsWith('http')) {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ error: 'Missing target URL' }));
+          return;
+        }
+
+        try {
+          // Collect request body
+          let body = '';
+          if (req.method !== 'GET') {
+            for await (const chunk of req) body += chunk;
+          }
+
+          // Forward all headers except host/origin (those would confuse the target)
+          const headers: Record<string, string> = {};
+          for (const [key, value] of Object.entries(req.headers)) {
+            if (key === 'host' || key === 'origin' || key === 'referer' || key === 'connection') continue;
+            if (typeof value === 'string') headers[key] = value;
+          }
+
+          const response = await fetch(targetUrl, {
+            method: req.method ?? 'POST',
+            headers,
+            body: body || undefined,
+          });
+
+          // Forward response headers
+          res.setHeader('Content-Type', response.headers.get('content-type') ?? 'application/json');
+          res.statusCode = response.status;
+
+          // Stream the response for SSE support
+          if (response.headers.get('content-type')?.includes('text/event-stream')) {
+            res.setHeader('Content-Type', 'text/event-stream');
+            res.setHeader('Cache-Control', 'no-cache');
+            res.setHeader('Connection', 'keep-alive');
+            const reader = response.body?.getReader();
+            if (reader) {
+              const pump = async () => {
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) { res.end(); break; }
+                  res.write(value);
+                }
+              };
+              pump().catch(() => res.end());
+            } else {
+              res.end(await response.text());
+            }
+          } else {
+            res.end(await response.text());
+          }
+        } catch (err: any) {
+          res.statusCode = 502;
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
     },
   };
 }

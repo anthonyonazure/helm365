@@ -1,8 +1,7 @@
 import { useState } from 'react';
-import { Check, Eye, EyeOff, Loader2, Zap, Brain, Microscope } from 'lucide-react';
+import { Check, Eye, EyeOff, Zap, Brain, Microscope } from 'lucide-react';
 import { useHelmStore } from '@/lib/store';
 import { PROVIDER_CONFIGS, type ProviderId } from '@/types/providers';
-import { createProvider } from '@/providers';
 import { toast } from 'sonner';
 
 export function SettingsView() {
@@ -24,30 +23,18 @@ function AIProviderSection() {
   const [editingProvider, setEditingProvider] = useState<ProviderId | null>(null);
   const [keyInput, setKeyInput] = useState('');
   const [showKey, setShowKey] = useState(false);
-  const [validating, setValidating] = useState(false);
 
   const handleSaveKey = async (providerId: ProviderId) => {
     if (!keyInput.trim()) return;
 
-    setValidating(true);
-    try {
-      const provider = createProvider(providerId, keyInput.trim());
-      const valid = await provider.validateKey(keyInput.trim());
-
-      if (valid) {
-        setProviderKey(providerId, keyInput.trim());
-        setProvider(providerId);
-        toast.success(`${PROVIDER_CONFIGS.find((p) => p.id === providerId)?.name} connected`);
-        setEditingProvider(null);
-        setKeyInput('');
-      } else {
-        toast.error('Invalid API key — please check and try again');
-      }
-    } catch {
-      toast.error('Failed to validate key — check your network connection');
-    } finally {
-      setValidating(false);
-    }
+    // Save the key directly — validation via browser fetch fails due to CORS
+    // (Anthropic, OpenAI, etc. don't allow browser-origin requests).
+    // The key will be validated on first real use through the Vite proxy.
+    setProviderKey(providerId, keyInput.trim());
+    setProvider(providerId);
+    toast.success(`${PROVIDER_CONFIGS.find((p) => p.id === providerId)?.name} connected`);
+    setEditingProvider(null);
+    setKeyInput('');
   };
 
   return (
@@ -112,11 +99,10 @@ function AIProviderSection() {
                   <div className="flex gap-2">
                     <button
                       onClick={() => handleSaveKey(config.id)}
-                      disabled={validating || !keyInput.trim()}
+                      disabled={!keyInput.trim()}
                       className="text-xs bg-helm-600 text-white px-3 py-1.5 rounded hover:bg-helm-700 disabled:opacity-50 flex items-center gap-1"
                     >
-                      {validating ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-                      {validating ? 'Validating...' : 'Save & Connect'}
+                      Save & Connect
                     </button>
                     <button
                       onClick={() => { setEditingProvider(null); setKeyInput(''); }}

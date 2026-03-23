@@ -1,6 +1,12 @@
 import type { AIProvider, Message, ToolDefinition, AIResponse, ModelInfo } from '@/types/providers';
 import { registerProvider } from './adapter';
 
+const isDev = typeof window !== 'undefined' && window.location?.hostname === 'localhost';
+
+function proxyUrl(url: string): string {
+  return isDev ? `/api/ai-proxy/${encodeURIComponent(url)}` : url;
+}
+
 function createAnthropicProvider(apiKey: string): AIProvider {
   const BASE_URL = 'https://api.anthropic.com/v1';
 
@@ -52,7 +58,7 @@ function createAnthropicProvider(apiKey: string): AIProvider {
       if (system) body.system = system;
       if (tools.length > 0) body.tools = convertTools(tools);
 
-      const res = await fetch(`${BASE_URL}/messages`, {
+      const res = await fetch(proxyUrl(`${BASE_URL}/messages`), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -104,7 +110,7 @@ function createAnthropicProvider(apiKey: string): AIProvider {
       if (system) body.system = system;
       if (tools.length > 0) body.tools = convertTools(tools);
 
-      const res = await fetch(`${BASE_URL}/messages`, {
+      const res = await fetch(proxyUrl(`${BASE_URL}/messages`), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -168,7 +174,7 @@ function createAnthropicProvider(apiKey: string): AIProvider {
 
     async validateKey(key: string) {
       try {
-        const res = await fetch(`${BASE_URL}/messages`, {
+        const res = await fetch(proxyUrl(`${BASE_URL}/messages`), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
