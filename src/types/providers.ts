@@ -1,6 +1,7 @@
 export type ProviderId =
   | 'anthropic'
   | 'openai'
+  | 'codex'
   | 'google'
   | 'mistral'
   | 'groq'
@@ -68,8 +69,8 @@ export interface ProviderConfig {
 export const PROVIDER_CONFIGS: ProviderConfig[] = [
   {
     id: 'anthropic',
-    name: 'Anthropic',
-    description: 'Claude Opus, Sonnet, Haiku',
+    name: 'Claude (Anthropic)',
+    description: 'Claude Opus 4, Sonnet 4, Haiku 4.5',
     requiresKey: true,
     models: [
       { id: 'claude-opus-4-20250514', name: 'Claude Opus 4 (Deep)' },
@@ -86,6 +87,15 @@ export const PROVIDER_CONFIGS: ProviderConfig[] = [
       { id: 'o1', name: 'o1 (Deep)' },
       { id: 'gpt-4o', name: 'GPT-4o (Smart)' },
       { id: 'gpt-4o-mini', name: 'GPT-4o Mini (Quick)' },
+    ],
+  },
+  {
+    id: 'codex',
+    name: 'Codex CLI (OpenAI)',
+    description: 'OpenAI Codex — uses GitHub login, no API key',
+    requiresKey: false,
+    models: [
+      { id: 'codex', name: 'Codex (Default)' },
     ],
   },
   {

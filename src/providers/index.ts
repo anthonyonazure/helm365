@@ -4,6 +4,7 @@
  */
 import './anthropic';
 import './openai'; // Also registers azure-openai
+import './codex';
 import './gemini';
 import './ollama';
 
