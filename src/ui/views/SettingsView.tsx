@@ -78,47 +78,76 @@ function AIProviderSection() {
 
               {isEditing ? (
                 <div className="space-y-2">
-                  <div className="flex gap-2">
-                    <div className="relative flex-1">
-                      <input
-                        type={showKey ? 'text' : 'password'}
-                        value={keyInput}
-                        onChange={(e) => setKeyInput(e.target.value)}
-                        placeholder={config.requiresKey ? 'Paste your API key...' : 'http://localhost:11434'}
-                        className="w-full text-xs bg-background border rounded px-3 py-2 pr-8 focus:outline-none focus:border-helm-500"
-                        onKeyDown={(e) => e.key === 'Enter' && handleSaveKey(config.id)}
-                      />
+                  {/* Codex: no input needed, just activate */}
+                  {config.id === 'codex' ? (
+                    <div className="flex gap-2">
                       <button
-                        onClick={() => setShowKey(!showKey)}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                        onClick={() => { setProvider(config.id); setEditingProvider(null); toast.success('Codex CLI activated'); }}
+                        className="text-xs bg-helm-600 text-white px-3 py-1.5 rounded hover:bg-helm-700"
                       >
-                        {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                        Activate Codex
+                      </button>
+                      <button
+                        onClick={() => setEditingProvider(null)}
+                        className="text-xs text-muted-foreground hover:text-foreground px-3 py-1.5"
+                      >
+                        Cancel
                       </button>
                     </div>
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => handleSaveKey(config.id)}
-                      disabled={!keyInput.trim()}
-                      className="text-xs bg-helm-600 text-white px-3 py-1.5 rounded hover:bg-helm-700 disabled:opacity-50 flex items-center gap-1"
-                    >
-                      Save & Connect
-                    </button>
-                    <button
-                      onClick={() => { setEditingProvider(null); setKeyInput(''); }}
-                      className="text-xs text-muted-foreground hover:text-foreground px-3 py-1.5"
-                    >
-                      Cancel
-                    </button>
-                  </div>
+                  ) : (
+                    <>
+                      <div className="flex gap-2">
+                        <div className="relative flex-1">
+                          <input
+                            type={showKey ? 'text' : 'password'}
+                            value={keyInput}
+                            onChange={(e) => setKeyInput(e.target.value)}
+                            placeholder={config.id === 'ollama' ? 'http://localhost:11434' : 'Paste your API key...'}
+                            className="w-full text-xs bg-background border rounded px-3 py-2 pr-8 focus:outline-none focus:border-helm-500"
+                            onKeyDown={(e) => e.key === 'Enter' && handleSaveKey(config.id)}
+                          />
+                          <button
+                            onClick={() => setShowKey(!showKey)}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                          >
+                            {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => handleSaveKey(config.id)}
+                          disabled={!keyInput.trim()}
+                          className="text-xs bg-helm-600 text-white px-3 py-1.5 rounded hover:bg-helm-700 disabled:opacity-50"
+                        >
+                          Save & Connect
+                        </button>
+                        <button
+                          onClick={() => { setEditingProvider(null); setKeyInput(''); }}
+                          className="text-xs text-muted-foreground hover:text-foreground px-3 py-1.5"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </div>
               ) : (
                 <div className="flex gap-2">
                   <button
-                    onClick={() => { setEditingProvider(config.id); setKeyInput(''); }}
+                    onClick={() => {
+                      if (config.id === 'codex') {
+                        // Codex: just activate, no key needed
+                        setProvider(config.id);
+                        toast.success('Codex CLI activated');
+                      } else {
+                        setEditingProvider(config.id);
+                        setKeyInput('');
+                      }
+                    }}
                     className="text-xs text-helm-600 hover:text-helm-700 font-medium"
                   >
-                    {hasKey ? 'Update Key' : 'Add API Key'}
+                    {config.id === 'codex' ? 'Activate' : hasKey ? 'Update Key' : 'Add API Key'}
                   </button>
                   {hasKey && !isActive && (
                     <button
