@@ -123,7 +123,7 @@ export function TenantsView() {
       {connections.length > 0 && (
         <div className="space-y-3">
           {connections.map((conn) => (
-            <TenantCard key={conn.id} connection={conn} onRemove={() => removeConnection(conn.id)} />
+            <TenantCard key={conn.id} connection={conn} onRemove={() => void removeConnection(conn.id)} />
           ))}
         </div>
       )}
@@ -259,7 +259,7 @@ function ConnectionWizard({ onClose }: { onClose: () => void }) {
 
       <div className="flex gap-2">
         <button
-          onClick={handleTest}
+          onClick={() => void handleTest()}
           disabled={testing || !tenantId || !clientId || !clientSecret}
           className="flex items-center gap-2 bg-muted text-foreground px-4 py-2 rounded-lg hover:bg-muted/80 text-sm disabled:opacity-50"
         >
@@ -268,7 +268,7 @@ function ConnectionWizard({ onClose }: { onClose: () => void }) {
         </button>
         {testResult?.success && (
           <button
-            onClick={handleSave}
+            onClick={() => void handleSave()}
             className="flex items-center gap-2 bg-helm-600 text-white px-4 py-2 rounded-lg hover:bg-helm-700 text-sm font-medium"
           >
             <CheckCircle className="h-4 w-4" /> Save & Activate

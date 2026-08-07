@@ -36,7 +36,7 @@ export function LoginView() {
         </div>
 
         {/* Form */}
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={(e) => void handleSubmit(e)} className="space-y-4">
           {isSignUp && (
             <div>
               <label className="text-sm font-medium block mb-1">Name</label>

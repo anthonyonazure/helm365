@@ -110,7 +110,7 @@ function AIProviderSection() {
                             onChange={(e) => setKeyInput(e.target.value)}
                             placeholder={config.id === 'ollama' ? 'http://localhost:11434' : 'Paste your API key...'}
                             className="w-full text-xs bg-background border rounded px-3 py-2 pr-8 focus:outline-none focus:border-helm-500"
-                            onKeyDown={(e) => e.key === 'Enter' && handleSaveKey(config.id)}
+                            onKeyDown={(e) => { if (e.key === 'Enter') void handleSaveKey(config.id); }}
                           />
                           <button
                             onClick={() => setShowKey(!showKey)}
@@ -122,7 +122,7 @@ function AIProviderSection() {
                       </div>
                       <div className="flex gap-2">
                         <button
-                          onClick={() => handleSaveKey(config.id)}
+                          onClick={() => void handleSaveKey(config.id)}
                           disabled={!keyInput.trim()}
                           className="text-xs bg-helm-600 text-white px-3 py-1.5 rounded hover:bg-helm-700 disabled:opacity-50"
                         >

@@ -1,4 +1,5 @@
-import type { AIProvider, Message, ToolDefinition, AIResponse, ModelInfo } from '@/types/providers';
+import type { AIProvider, Message, ToolDefinition, AIResponse, AIChunk, ModelInfo, ToolCall } from '@/types/providers';
+import { isRecord, pick, pickArray, pickNumber, pickString } from '@/lib/json';
 import { registerProvider } from './adapter';
 
 function createGeminiProvider(apiKey: string): AIProvider {
@@ -57,44 +58,43 @@ function createGeminiProvider(apiKey: string): AIProvider {
         throw new Error(`Gemini API error ${res.status}: ${err}`);
       }
 
-      const data = await res.json();
-      const candidate = data.candidates?.[0];
-      const parts = candidate?.content?.parts ?? [];
+      const data: unknown = await res.json();
+      const parts = pickArray(pickArray(data, 'candidates')[0], 'content', 'parts');
 
-      const content = parts
-        .filter((p: { text?: string }) => p.text)
-        .map((p: { text: string }) => p.text)
-        .join('');
+      const content = parts.map((part) => pickString(part, 'text') ?? '').join('');
 
-      const toolCalls = parts
-        .filter((p: { functionCall?: unknown }) => p.functionCall)
-        .map((p: { functionCall: { name: string; args: Record<string, unknown> } }, i: number) => ({
-          id: `call_${i}`,
-          name: p.functionCall.name,
-          arguments: p.functionCall.args,
-        }));
+      const toolCalls = parts.flatMap<ToolCall>((part, i) => {
+        const name = pickString(part, 'functionCall', 'name');
+        if (!name) return [];
+        const args = pick(part, 'functionCall', 'args');
+        // Gemini does not issue call ids, so the index is the only stable handle
+        // for matching a tool result back to its request.
+        return [{ id: `call_${i}`, name, arguments: isRecord(args) ? args : {} }];
+      });
 
       return {
         content,
         toolCalls,
         usage: {
-          inputTokens: data.usageMetadata?.promptTokenCount ?? 0,
-          outputTokens: data.usageMetadata?.candidatesTokenCount ?? 0,
+          inputTokens: pickNumber(data, 'usageMetadata', 'promptTokenCount') ?? 0,
+          outputTokens: pickNumber(data, 'usageMetadata', 'candidatesTokenCount') ?? 0,
         },
       } satisfies AIResponse;
     },
 
-    async *stream(_messages, _tools, _model) {
+    // Not an async generator: Gemini SSE is unimplemented, so this only ever
+    // rejects. Declaring it async* would promise chunks it can never yield.
+    stream(): AsyncIterable<AIChunk> {
       // TODO: Implement streaming with Gemini SSE
       throw new Error('Gemini streaming not yet implemented — use chat() instead');
     },
 
-    async listModels() {
-      return [
+    listModels() {
+      return Promise.resolve([
         { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', contextWindow: 1000000, supportsToolCalling: true },
         { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', contextWindow: 1000000, supportsToolCalling: true },
         { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', contextWindow: 1000000, supportsToolCalling: true },
-      ] satisfies ModelInfo[];
+      ] satisfies ModelInfo[]);
     },
 
     async validateKey(key: string) {

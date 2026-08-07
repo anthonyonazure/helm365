@@ -9,7 +9,21 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {
-    languageOptions: { parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname } },
+    // tsconfig.json deliberately includes only "src", so the root-level config
+    // files (eslint.config.js, postcss.config.js, vite/tailwind configs) belong
+    // to no TS project and the project service refuses to parse them. They are
+    // build plumbing, not application source, so widening tsconfig's include to
+    // cover them would drag them into the shipped type-check. allowDefaultProject
+    // hands just those files to a default project instead, which keeps the
+    // type-aware rules switched on for them without changing what tsc compiles.
+    languageOptions: {
+      parserOptions: {
+        projectService: {
+          allowDefaultProject: ["*.js", "*.mjs", "*.cjs", "*.ts", "*.config.js", "*.config.ts"],
+        },
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
     rules: {
       "@typescript-eslint/no-floating-promises": "error",
       "@typescript-eslint/no-misused-promises": "error",

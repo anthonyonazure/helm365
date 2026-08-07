@@ -4,6 +4,7 @@
  */
 
 import { supabase } from './supabase';
+import type { ActionRow, Json, TenantConnectionRow } from './database.types';
 
 // ─── Tenant Connections ──────────────────────────────────────────────
 
@@ -24,7 +25,9 @@ export async function dbAddTenantConnection(teamId: string, conn: {
   tenantDomain: string;
   clientId: string;
   clientSecret: string;
-  authMethod?: string;
+  // The column is CHECK-constrained to these three values, so accepting a bare
+  // `string` here would let a typo reach the database and fail at runtime.
+  authMethod?: TenantConnectionRow['auth_method'];
 }) {
   const { data, error } = await supabase
     .from('tenant_connections')
@@ -55,7 +58,10 @@ export async function dbRemoveTenantConnection(id: string) {
   if (error) console.error('Failed to remove tenant:', error);
 }
 
-export async function dbUpdateTenantHealth(id: string, status: string) {
+export async function dbUpdateTenantHealth(
+  id: string,
+  status: TenantConnectionRow['health_status'],
+) {
   const { error } = await supabase
     .from('tenant_connections')
     .update({ health_status: status, last_health_check: new Date().toISOString() })
@@ -144,10 +150,11 @@ export async function dbLogAction(teamId: string, action: {
   userId: string;
   tenantConnectionId?: string;
   agent: string;
-  tier: string;
+  // tier and status are CHECK-constrained columns, so they are unions here too.
+  tier: ActionRow['tier'];
   intent: string;
-  toolCalls: unknown;
-  status: string;
+  toolCalls: Json;
+  status: ActionRow['status'];
   processingMode: string;
   aiProvider?: string;
   aiModel?: string;
@@ -195,7 +202,10 @@ export async function dbGetTenantCredentials(tenantConnectionId: string) {
     .eq('id', tenantConnectionId)
     .single();
 
-  if (!data) return null;
+  // client_secret_ref is nullable (a connection can exist before its secret is
+  // stored), and every caller needs a real secret to reach Graph, so an
+  // incomplete row is reported as "no credentials" rather than a blank secret.
+  if (!data?.client_secret_ref) return null;
 
   return {
     tenantId: data.tenant_id,

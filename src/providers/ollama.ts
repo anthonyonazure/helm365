@@ -1,4 +1,5 @@
-import type { AIProvider, Message, ToolDefinition, AIResponse, ModelInfo } from '@/types/providers';
+import type { AIProvider, Message, ToolDefinition, AIResponse, ModelInfo, ToolCall } from '@/types/providers';
+import { isRecord, parseJson, pick, pickArray, pickBoolean, pickNumber, pickString } from '@/lib/json';
 import { registerProvider } from './adapter';
 
 function createOllamaProvider(_apiKey: string, baseUrl = 'http://localhost:11434'): AIProvider {
@@ -41,22 +42,22 @@ function createOllamaProvider(_apiKey: string, baseUrl = 'http://localhost:11434
         throw new Error(`Ollama error ${res.status}: ${err}`);
       }
 
-      const data = await res.json();
+      const data: unknown = await res.json();
 
-      const toolCalls = data.message?.tool_calls?.map(
-        (tc: { function: { name: string; arguments: Record<string, unknown> } }, i: number) => ({
-          id: `call_${i}`,
-          name: tc.function.name,
-          arguments: tc.function.arguments,
-        }),
-      ) ?? [];
+      const toolCalls = pickArray(data, 'message', 'tool_calls').flatMap<ToolCall>((tc, i) => {
+        const name = pickString(tc, 'function', 'name');
+        if (!name) return [];
+        const args = pick(tc, 'function', 'arguments');
+        // Ollama omits call ids, so the index is the only stable handle.
+        return [{ id: `call_${i}`, name, arguments: isRecord(args) ? args : {} }];
+      });
 
       return {
-        content: data.message?.content ?? '',
+        content: pickString(data, 'message', 'content') ?? '',
         toolCalls,
         usage: {
-          inputTokens: data.prompt_eval_count ?? 0,
-          outputTokens: data.eval_count ?? 0,
+          inputTokens: pickNumber(data, 'prompt_eval_count') ?? 0,
+          outputTokens: pickNumber(data, 'eval_count') ?? 0,
         },
       } satisfies AIResponse;
     },
@@ -90,18 +91,19 @@ function createOllamaProvider(_apiKey: string, baseUrl = 'http://localhost:11434
 
         for (const line of lines) {
           if (!line.trim()) continue;
+          let frame: unknown;
           try {
-            const data = JSON.parse(line);
-            if (data.done) {
-              yield { type: 'done' as const };
-              return;
-            }
-            if (data.message?.content) {
-              yield { type: 'text' as const, content: data.message.content };
-            }
+            frame = parseJson(line);
           } catch {
-            // Skip malformed
+            // A partially flushed line is normal mid-stream; wait for the rest.
+            continue;
           }
+          if (pickBoolean(frame, 'done')) {
+            yield { type: 'done' as const };
+            return;
+          }
+          const content = pickString(frame, 'message', 'content');
+          if (content) yield { type: 'text' as const, content };
         }
       }
     },
@@ -110,13 +112,12 @@ function createOllamaProvider(_apiKey: string, baseUrl = 'http://localhost:11434
       try {
         const res = await fetch(`${baseUrl}/api/tags`);
         if (!res.ok) return [];
-        const data = await res.json();
-        return (data.models ?? []).map((m: { name: string; details?: { parameter_size?: string } }) => ({
-          id: m.name,
-          name: m.name,
-          contextWindow: 8192,
-          supportsToolCalling: true,
-        })) satisfies ModelInfo[];
+        const data: unknown = await res.json();
+        return pickArray(data, 'models').flatMap<ModelInfo>((m) => {
+          const name = pickString(m, 'name');
+          if (!name) return [];
+          return [{ id: name, name, contextWindow: 8192, supportsToolCalling: true }];
+        });
       } catch {
         return [];
       }

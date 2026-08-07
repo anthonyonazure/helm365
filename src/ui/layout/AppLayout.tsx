@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Outlet, NavLink, useLocation } from 'react-router-dom';
+import { Outlet, NavLink, useLocation } from 'react-router';
 import { CommandBar } from '../components/CommandBar';
 import { Ship, LayoutDashboard, MessageSquare, Activity, Shield, HardDrive, Settings, Moon, Sun, Bell, LogOut } from 'lucide-react';
 import { useHelmStore } from '@/lib/store';
@@ -128,7 +128,7 @@ export function AppLayout() {
           {/* Sign out at bottom */}
           <div className="mt-auto pt-2 border-t w-full flex justify-center">
             <button
-              onClick={signOut}
+              onClick={() => void signOut()}
               title="Sign out"
               className="p-2 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted"
             >

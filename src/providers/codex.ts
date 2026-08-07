@@ -1,5 +1,6 @@
 import type { AIProvider, AIResponse, ModelInfo } from '@/types/providers';
 import { registerProvider } from './adapter';
+import { parseOpenAIResponse, parseOpenAIStreamDelta, readSseEvents } from './parse';
 
 /**
  * Codex CLI provider — uses OpenAI API format.
@@ -45,25 +46,8 @@ function createCodexProvider(apiKey: string): AIProvider {
         throw new Error(`Codex API error ${res.status}: ${err}`);
       }
 
-      const data = await res.json();
-      const choice = data.choices?.[0];
-
-      const toolCalls = choice?.message?.tool_calls?.map(
-        (tc: { id: string; function: { name: string; arguments: string } }) => ({
-          id: tc.id,
-          name: tc.function.name,
-          arguments: JSON.parse(tc.function.arguments),
-        }),
-      ) ?? [];
-
-      return {
-        content: choice?.message?.content ?? '',
-        toolCalls,
-        usage: {
-          inputTokens: data.usage?.prompt_tokens ?? 0,
-          outputTokens: data.usage?.completion_tokens ?? 0,
-        },
-      } satisfies AIResponse;
+      const data: unknown = await res.json();
+      return parseOpenAIResponse(data) satisfies AIResponse;
     },
 
     async *stream(messages, _tools, model = 'gpt-4o') {
@@ -82,36 +66,18 @@ function createCodexProvider(apiKey: string): AIProvider {
 
       if (!res.ok) throw new Error(`Codex error: ${res.status}`);
 
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error('No response body');
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6);
-          if (data === '[DONE]') { yield { type: 'done' as const }; return; }
-          try {
-            const event = JSON.parse(data);
-            if (event.choices?.[0]?.delta?.content) {
-              yield { type: 'text' as const, content: event.choices[0].delta.content };
-            }
-          } catch { /* skip */ }
-        }
+      for await (const event of readSseEvents(res.body)) {
+        const content = parseOpenAIStreamDelta(event);
+        if (content) yield { type: 'text' as const, content };
       }
+      yield { type: 'done' as const };
     },
 
-    async listModels() {
-      return [
+    listModels() {
+      return Promise.resolve([
         { id: 'gpt-4o', name: 'GPT-4o', contextWindow: 128000, supportsToolCalling: true },
         { id: 'gpt-4o-mini', name: 'GPT-4o Mini', contextWindow: 128000, supportsToolCalling: true },
-      ] satisfies ModelInfo[];
+      ] satisfies ModelInfo[]);
     },
 
     async validateKey(key: string) {

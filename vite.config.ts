@@ -12,7 +12,7 @@ function msAuthProxy(): Plugin {
     name: 'ms-auth-proxy',
     configureServer(server) {
       // Proxy token requests
-      server.middlewares.use('/api/ms-token', async (req, res) => {
+      server.middlewares.use('/api/ms-token', (req, res) => void (async () => {
         if (req.method !== 'POST') {
           res.statusCode = 405;
           res.end(JSON.stringify({ error: 'POST only' }));
@@ -23,13 +23,22 @@ function msAuthProxy(): Plugin {
         for await (const chunk of req) body += chunk;
 
         try {
-          const params = JSON.parse(body);
-          const tokenUrl = `https://login.microsoftonline.com/${params.tenantId}/oauth2/v2.0/token`;
+          const params: unknown = JSON.parse(body);
+          const field = (key: string): string => {
+            const value =
+              typeof params === 'object' && params !== null
+                ? (params as Record<string, unknown>)[key]
+                : undefined;
+            if (typeof value !== 'string') throw new Error('Missing ' + key + ' in token request');
+            return value;
+          };
+
+          const tokenUrl = `https://login.microsoftonline.com/${encodeURIComponent(field('tenantId'))}/oauth2/v2.0/token`;
 
           const tokenBody = new URLSearchParams({
             grant_type: 'client_credentials',
-            client_id: params.clientId,
-            client_secret: params.clientSecret,
+            client_id: field('clientId'),
+            client_secret: field('clientSecret'),
             scope: 'https://graph.microsoft.com/.default',
           });
 
@@ -42,14 +51,14 @@ function msAuthProxy(): Plugin {
           res.setHeader('Content-Type', 'application/json');
           res.statusCode = response.status;
           res.end(await response.text());
-        } catch (err: any) {
+        } catch (err) {
           res.statusCode = 502;
-          res.end(JSON.stringify({ error: err.message }));
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
         }
-      });
+      })());
 
       // Proxy Graph API requests
-      server.middlewares.use('/api/graph', async (req, res) => {
+      server.middlewares.use('/api/graph', (req, res) => void (async () => {
         const graphPath = req.url?.replace(/^\/api\/graph/, '') ?? '/';
         const graphUrl = `https://graph.microsoft.com/v1.0${graphPath}`;
 
@@ -60,7 +69,7 @@ function msAuthProxy(): Plugin {
 
           // Forward auth header
           if (req.headers.authorization) {
-            headers['Authorization'] = req.headers.authorization as string;
+            headers['Authorization'] = String(req.headers.authorization);
           }
           // Forward ConsistencyLevel
           if (req.headers['consistencylevel']) {
@@ -85,13 +94,13 @@ function msAuthProxy(): Plugin {
           }
           res.statusCode = response.status;
           res.end(await response.text());
-        } catch (err: any) {
+        } catch (err) {
           res.statusCode = 502;
-          res.end(JSON.stringify({ error: err.message }));
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
         }
-      });
+      })());
       // Generic AI provider proxy — forwards requests to any AI API
-      server.middlewares.use('/api/ai-proxy', async (req, res) => {
+      server.middlewares.use('/api/ai-proxy', (req, res) => void (async () => {
         const targetUrl = decodeURIComponent(req.url?.slice(1) ?? '');
         if (!targetUrl || !targetUrl.startsWith('http')) {
           res.statusCode = 400;
@@ -144,11 +153,11 @@ function msAuthProxy(): Plugin {
           } else {
             res.end(await response.text());
           }
-        } catch (err: any) {
+        } catch (err) {
           res.statusCode = 502;
-          res.end(JSON.stringify({ error: err.message }));
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
         }
-      });
+      })());
     },
   };
 }

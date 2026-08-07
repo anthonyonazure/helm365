@@ -1,5 +1,7 @@
-import type { AIProvider, Message, ToolDefinition, AIResponse, ModelInfo } from '@/types/providers';
+import type { AIProvider, Message, ToolDefinition, AIResponse, ModelInfo, ToolCall } from '@/types/providers';
+import { isRecord, pick, pickArray, pickNumber, pickString } from '@/lib/json';
 import { registerProvider } from './adapter';
+import { readSseEvents } from './parse';
 
 const isDev = typeof window !== 'undefined' && window.location?.hostname === 'localhost';
 
@@ -73,27 +75,30 @@ function createAnthropicProvider(apiKey: string): AIProvider {
         throw new Error(`Anthropic API error ${res.status}: ${err}`);
       }
 
-      const data = await res.json();
+      const data: unknown = await res.json();
+      const blocks = pickArray(data, 'content');
 
-      const content = data.content
-        ?.filter((c: { type: string }) => c.type === 'text')
-        .map((c: { text: string }) => c.text)
-        .join('') ?? '';
+      const content = blocks
+        .filter((block) => pickString(block, 'type') === 'text')
+        .map((block) => pickString(block, 'text') ?? '')
+        .join('');
 
-      const toolCalls = data.content
-        ?.filter((c: { type: string }) => c.type === 'tool_use')
-        .map((c: { id: string; name: string; input: Record<string, unknown> }) => ({
-          id: c.id,
-          name: c.name,
-          arguments: c.input,
-        })) ?? [];
+      const toolCalls = blocks
+        .filter((block) => pickString(block, 'type') === 'tool_use')
+        .flatMap<ToolCall>((block) => {
+          const id = pickString(block, 'id');
+          const name = pickString(block, 'name');
+          if (!id || !name) return [];
+          const input = pick(block, 'input');
+          return [{ id, name, arguments: isRecord(input) ? input : {} }];
+        });
 
       return {
         content,
         toolCalls,
         usage: {
-          inputTokens: data.usage?.input_tokens ?? 0,
-          outputTokens: data.usage?.output_tokens ?? 0,
+          inputTokens: pickNumber(data, 'usage', 'input_tokens') ?? 0,
+          outputTokens: pickNumber(data, 'usage', 'output_tokens') ?? 0,
         },
       } satisfies AIResponse;
     },
@@ -125,51 +130,23 @@ function createAnthropicProvider(apiKey: string): AIProvider {
         throw new Error(`Anthropic API error ${res.status}: ${err}`);
       }
 
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error('No response body');
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6);
-          if (data === '[DONE]') {
-            yield { type: 'done' as const };
-            return;
-          }
-
-          try {
-            const event = JSON.parse(data);
-            if (event.type === 'content_block_delta') {
-              if (event.delta?.type === 'text_delta') {
-                yield { type: 'text' as const, content: event.delta.text };
-              }
-            }
-            if (event.type === 'message_stop') {
-              yield { type: 'done' as const };
-            }
-          } catch {
-            // Skip malformed events
-          }
+      for await (const event of readSseEvents(res.body)) {
+        const eventType = pickString(event, 'type');
+        if (eventType === 'content_block_delta' && pickString(event, 'delta', 'type') === 'text_delta') {
+          yield { type: 'text' as const, content: pickString(event, 'delta', 'text') ?? '' };
+        }
+        if (eventType === 'message_stop') {
+          yield { type: 'done' as const };
         }
       }
     },
 
-    async listModels() {
-      return [
+    listModels() {
+      return Promise.resolve([
         { id: 'claude-opus-4-20250514', name: 'Claude Opus 4', contextWindow: 200000, supportsToolCalling: true },
         { id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4', contextWindow: 200000, supportsToolCalling: true },
         { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', contextWindow: 200000, supportsToolCalling: true },
-      ] satisfies ModelInfo[];
+      ] satisfies ModelInfo[]);
     },
 
     async validateKey(key: string) {

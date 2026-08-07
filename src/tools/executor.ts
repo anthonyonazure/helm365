@@ -4,6 +4,7 @@
  */
 
 import { graphFetch, type GraphCredentials } from '@/lib/graph-client';
+import { pick } from '@/lib/json';
 
 export interface ToolExecRequest {
   toolName: string;
@@ -19,7 +20,25 @@ export interface ToolExecResult {
   error?: string;
 }
 
-type ToolHandler = (args: Record<string, unknown>, creds: GraphCredentials) => Promise<ToolExecResult>;
+// Several handlers (the PowerShell stubs, the pure-formatting reports) do no
+// I/O at all. Allowing a plain return rather than forcing a pointless `async`
+// keeps the signature honest about which ones actually await anything.
+type ToolHandler = (
+  args: Record<string, unknown>,
+  creds: GraphCredentials,
+) => ToolExecResult | Promise<ToolExecResult>;
+
+/**
+ * Render an untyped Graph field into a human-readable summary.
+ * Graph responses are `unknown`, so interpolating them directly would print
+ * "[object Object]" for anything that is not already a primitive.
+ */
+function text(value: unknown, fallback = ''): string {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === 'string') return value || fallback;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return JSON.stringify(value);
+}
 
 const handlers = new Map<string, ToolHandler>();
 
@@ -105,7 +124,7 @@ register('graph_get_user', async (args, creds) => {
   return {
     success: true,
     data: user,
-    summary: `${user.displayName} (${user.userPrincipalName}) — ${user.accountEnabled ? 'Active' : 'Disabled'}, ${user.department ?? 'No department'}`,
+    summary: `${text(user.displayName)} (${text(user.userPrincipalName)}) — ${user.accountEnabled ? 'Active' : 'Disabled'}, ${text(user.department, 'No department')}`,
   };
 });
 
@@ -138,7 +157,7 @@ register('graph_reset_password', async (args, creds) => {
   return {
     success: true,
     data: { temporaryPassword: tempPassword, forceChange },
-    summary: `Password reset for ${userName}. Temp password: ${tempPassword}${forceChange ? ' (must change at next login)' : ''}`,
+    summary: `Password reset for ${text(userName)}. Temp password: ${tempPassword}${forceChange ? ' (must change at next login)' : ''}`,
     rollbackData: { userId, action: 'password_reset' }, // Can't undo password reset, but log it
   };
 });
@@ -188,7 +207,7 @@ register('graph_reset_mfa', async (args, creds) => {
   return {
     success: true,
     data: { methodsRemoved: deleted, sessionsRevoked: revokeSessions },
-    summary: `MFA reset for ${userName}. ${deleted} auth method(s) removed${revokeSessions ? ', sessions revoked' : ''}. User will be prompted to re-register MFA at next sign-in.`,
+    summary: `MFA reset for ${text(userName)}. ${deleted} auth method(s) removed${revokeSessions ? ', sessions revoked' : ''}. User will be prompted to re-register MFA at next sign-in.`,
     rollbackData: { userId, methodsRemoved: deleted },
   };
 });
@@ -294,7 +313,7 @@ register('graph_create_user', async (args, creds) => {
       userPrincipalName: args.userPrincipalName,
       mailNickname: args.mailNickname,
       accountEnabled: true,
-      usageLocation: (args.usageLocation as string) ?? 'US',
+      usageLocation: args.usageLocation ?? 'US',
       department: args.department,
       jobTitle: args.jobTitle,
       passwordProfile: {
@@ -313,7 +332,7 @@ register('graph_create_user', async (args, creds) => {
   return {
     success: true,
     data: { ...user, temporaryPassword: password },
-    summary: `User ${args.displayName} (${args.userPrincipalName}) created. Temp password: ${password}`,
+    summary: `User ${text(args.displayName)} (${text(args.userPrincipalName)}) created. Temp password: ${password}`,
     rollbackData: { userId: user.id, action: 'create' },
   };
 });
@@ -366,7 +385,7 @@ register('graph_delete_user', async (args, creds) => {
   return {
     success: true,
     data: null,
-    summary: `User ${userName} deleted. Recoverable from deleted users for 30 days.`,
+    summary: `User ${text(userName)} deleted. Recoverable from deleted users for 30 days.`,
     rollbackData: { userId, userData: userResult.data, action: 'delete' },
   };
 });
@@ -449,11 +468,11 @@ register('graph_get_mailbox_settings', async (args, creds) => {
   return {
     success: true,
     data: settings,
-    summary: `Mailbox settings for ${userId}: Language=${(settings.language as Record<string,unknown>)?.displayName ?? 'unknown'}, TimeZone=${settings.timeZone}, OOO=${isOOO ? 'ON' : 'OFF'}`,
+    summary: `Mailbox settings for ${userId}: Language=${text(pick(settings.language, 'displayName'), 'unknown')}, TimeZone=${text(settings.timeZone)}, OOO=${isOOO ? 'ON' : 'OFF'}`,
   };
 });
 
-register('graph_set_email_forwarding', async (args, _creds) => {
+register('graph_set_email_forwarding', (args, _creds) => {
   const userId = args.userId as string;
   const forwardTo = args.forwardTo as string;
   const keepCopy = (args.keepCopy as boolean) ?? true;
@@ -527,7 +546,7 @@ register('graph_list_mailboxes', async (args, creds) => {
   };
 });
 
-register('graph_grant_mailbox_access', async (args, _creds) => {
+register('graph_grant_mailbox_access', (args, _creds) => {
   const mailboxId = args.mailboxId as string;
   const granteeId = args.granteeId as string;
   const permission = args.permission as string;
@@ -574,7 +593,7 @@ register('graph_list_risky_users', async (args, creds) => {
     '$top': String((args.top as number) ?? 25),
     '$select': 'id,userDisplayName,userPrincipalName,riskLevel,riskState,riskLastUpdatedDateTime',
   };
-  if (args.riskLevel) params['$filter'] = `riskLevel eq '${args.riskLevel}'`;
+  if (args.riskLevel) params['$filter'] = `riskLevel eq '${text(args.riskLevel)}'`;
 
   const result = await graphFetch(creds, '/identityProtection/riskyUsers', { params });
   if (!result.ok) return { success: false, data: null, summary: `Risky users failed: ${result.error}`, error: result.error };
@@ -629,8 +648,8 @@ register('graph_get_audit_logs', async (args, creds) => {
   };
 
   const filters: string[] = [];
-  if (args.activityType) filters.push(`activityDisplayName eq '${args.activityType}'`);
-  if (args.startDate) filters.push(`activityDateTime ge ${args.startDate}`);
+  if (args.activityType) filters.push(`activityDisplayName eq '${text(args.activityType)}'`);
+  if (args.startDate) filters.push(`activityDateTime ge ${text(args.startDate)}`);
   if (filters.length > 0) params['$filter'] = filters.join(' and ');
 
   const result = await graphFetch(creds, '/auditLogs/directoryAudits', { params });
@@ -860,7 +879,7 @@ register('graph_get_device', async (args, creds) => {
   return {
     success: true,
     data: d,
-    summary: `${d.deviceName}: ${d.operatingSystem} ${d.osVersion}, User: ${d.userDisplayName}, Compliance: ${d.complianceState}, Last sync: ${d.lastSyncDateTime}`,
+    summary: `${text(d.deviceName)}: ${text(d.operatingSystem)} ${text(d.osVersion)}, User: ${text(d.userDisplayName)}, Compliance: ${text(d.complianceState)}, Last sync: ${text(d.lastSyncDateTime)}`,
   };
 });
 
@@ -892,8 +911,8 @@ register('graph_wipe_device', async (args, creds) => {
     success: true,
     data: { deviceId, keepUserData },
     summary: keepUserData
-      ? `Selective wipe initiated for ${deviceName}. Company data will be removed, personal data preserved.`
-      : `⚠️ FULL WIPE initiated for ${deviceName}. ALL data will be erased and device factory reset.`,
+      ? `Selective wipe initiated for ${text(deviceName)}. Company data will be removed, personal data preserved.`
+      : `⚠️ FULL WIPE initiated for ${text(deviceName)}. ALL data will be erased and device factory reset.`,
     rollbackData: { deviceId, action: 'wipe', keepUserData },
   };
 });
@@ -911,7 +930,7 @@ register('graph_retire_device', async (args, creds) => {
   return {
     success: true,
     data: { deviceId },
-    summary: `Device ${deviceName} retired. Company data and management profile removed. Personal data preserved.`,
+    summary: `Device ${text(deviceName)} retired. Company data and management profile removed. Personal data preserved.`,
     rollbackData: { deviceId, action: 'retire' },
   };
 });
@@ -924,7 +943,7 @@ register('graph_list_risky_signins', async (args, creds) => {
     '$orderby': 'activityDateTime desc',
     '$select': 'id,userId,userDisplayName,ipAddress,location,riskLevelDuringSignIn,riskState,activityDateTime,clientAppUsed',
   };
-  if (args.riskLevel) params['$filter'] = `riskLevelDuringSignIn eq '${args.riskLevel}'`;
+  if (args.riskLevel) params['$filter'] = `riskLevelDuringSignIn eq '${text(args.riskLevel)}'`;
 
   const result = await graphFetch(creds, '/identityProtection/riskyServicePrincipals', { params });
 
@@ -955,8 +974,8 @@ register('graph_list_security_alerts', async (args, creds) => {
     '$orderby': 'createdDateTime desc',
   };
   const filters: string[] = [];
-  if (args.severity) filters.push(`severity eq '${args.severity}'`);
-  if (args.status) filters.push(`status eq '${args.status}'`);
+  if (args.severity) filters.push(`severity eq '${text(args.severity)}'`);
+  if (args.status) filters.push(`status eq '${text(args.status)}'`);
   if (filters.length > 0) params['$filter'] = filters.join(' and ');
 
   const result = await graphFetch(creds, '/security/alerts_v2', { params });
@@ -1051,7 +1070,7 @@ register('graph_create_ca_policy', async (args, creds) => {
   return {
     success: true,
     data: policy,
-    summary: `CA policy "${args.displayName}" created in ${state === 'enabledForReportingButNotEnforced' ? 'REPORT-ONLY' : state.toUpperCase()} mode.${state === 'enabledForReportingButNotEnforced' ? ' Monitor for 7+ days before enforcing.' : ''}`,
+    summary: `CA policy "${text(args.displayName)}" created in ${state === 'enabledForReportingButNotEnforced' ? 'REPORT-ONLY' : state.toUpperCase()} mode.${state === 'enabledForReportingButNotEnforced' ? ' Monitor for 7+ days before enforcing.' : ''}`,
     rollbackData: { policyId: policy.id, action: 'create_ca_policy' },
   };
 });
@@ -1096,7 +1115,7 @@ register('graph_delete_ca_policy', async (args, creds) => {
   return {
     success: true,
     data: null,
-    summary: `⚠️ CA policy "${policyName}" DELETED. This may immediately affect user access.`,
+    summary: `⚠️ CA policy "${text(policyName)}" DELETED. This may immediately affect user access.`,
     rollbackData: { policyId, policyData: current.data, action: 'delete_ca_policy' },
   };
 });
@@ -1397,7 +1416,7 @@ register('graph_list_apps', async (args, creds) => {
 // ─── Exchange PowerShell Stubs ───────────────────────────────────────
 // These need a PowerShell execution proxy — registering with informative messages
 
-register('exchange_block_sender', async (args, _creds) => {
+register('exchange_block_sender', (args, _creds) => {
   const entry = args.entry as string;
   const notes = (args.notes as string) ?? '';
   return {
@@ -1408,7 +1427,7 @@ register('exchange_block_sender', async (args, _creds) => {
   };
 });
 
-register('exchange_allow_sender', async (args, _creds) => {
+register('exchange_allow_sender', (args, _creds) => {
   const entry = args.entry as string;
   const notes = (args.notes as string) ?? '';
   return {
@@ -1445,7 +1464,7 @@ register('graph_message_trace', async (args, creds) => {
   };
 });
 
-register('graph_create_shared_mailbox', async (args, _creds) => {
+register('graph_create_shared_mailbox', (args, _creds) => {
   const displayName = args.displayName as string;
   const emailAddress = args.emailAddress as string;
   const members = (args.members as string[]) ?? [];
@@ -1469,7 +1488,7 @@ register('graph_list_quarantine', async (args, creds) => {
     return {
       success: true,
       data: [],
-      summary: `Quarantine listing requires Exchange Online PowerShell (Get-QuarantineMessage). Graph API proxy returned: ${result.error}. PowerShell command: Get-QuarantineMessage ${args.recipientAddress ? `-RecipientAddress ${args.recipientAddress}` : ''} -PageSize 50`,
+      summary: `Quarantine listing requires Exchange Online PowerShell (Get-QuarantineMessage). Graph API proxy returned: ${result.error}. PowerShell command: Get-QuarantineMessage ${args.recipientAddress ? `-RecipientAddress ${text(args.recipientAddress)}` : ''} -PageSize 50`,
     };
   }
 
@@ -1481,7 +1500,7 @@ register('graph_list_quarantine', async (args, creds) => {
   };
 });
 
-register('graph_release_quarantine', async (args, _creds) => {
+register('graph_release_quarantine', (args, _creds) => {
   const messageIds = args.messageIds as string[];
   return {
     success: true,
@@ -1571,7 +1590,7 @@ register('report_security_posture', async (_, creds) => {
 
 register('report_compliance_status', async (args, creds) => {
   const h = handlers.get('compliance_run_assessment');
-  if (h) return h({ framework: (args.framework as string) ?? 'cis-m365' }, creds);
+  if (h) return h({ framework: args.framework ?? 'cis-m365' }, creds);
   return { success: true, data: null, summary: 'Compliance report: run assessment for details.' };
 });
 
@@ -1595,11 +1614,11 @@ register('report_user_activity', async (args, creds) => {
   };
 });
 
-register('report_cross_tenant', async () => {
+register('report_cross_tenant', () => {
   return { success: true, data: null, summary: 'Cross-tenant report requires iterating all connected tenants. Connect multiple tenants for fleet-wide analysis.' };
 });
 
-register('report_actions_summary', async (args) => {
+register('report_actions_summary', (args) => {
   return { success: true, data: { period: (args.period as string) ?? 'week' }, summary: 'Actions summary: Check the Action Feed and Operations Center for real-time tracking.' };
 });
 
@@ -1643,7 +1662,7 @@ register('compliance_run_assessment', async (args, creds) => {
 
 // ─── Policy Handlers ─────────────────────────────────────────────────
 
-register('policy_list_templates', async () => {
+register('policy_list_templates', () => {
   const templates = [
     { id: 'cis-m365-l1', name: 'CIS M365 Level 1', category: 'compliance', controls: 45 },
     { id: 'cis-m365-l2', name: 'CIS M365 Level 2', category: 'compliance', controls: 78 },
@@ -1673,28 +1692,28 @@ register('policy_get_drift_status', async (_, creds) => {
   };
 });
 
-register('policy_list_backups', async () => {
+register('policy_list_backups', () => {
   return { success: true, data: [], summary: 'No backups. Use "backup policies" to create a snapshot. Requires Supabase backend.' };
 });
 
-register('policy_compare_tenants', async (args) => {
-  return { success: true, data: args, summary: `Compare ${args.tenantA} vs ${args.tenantB}: Connect both tenants to enable configuration diff.` };
+register('policy_compare_tenants', (args) => {
+  return { success: true, data: args, summary: `Compare ${text(args.tenantA)} vs ${text(args.tenantB)}: Connect both tenants to enable configuration diff.` };
 });
 
-register('policy_deploy_template', async (args) => {
+register('policy_deploy_template', (args) => {
   const mode = (args.mode as string) ?? 'report-only';
   return {
     success: true, data: args,
-    summary: `Template "${args.templateId}" deployment queued in ${mode.toUpperCase()} mode.${mode !== 'enforce' ? ' Monitor before enforcing.' : ' ⚠️ Live enforcement.'}`,
+    summary: `Template "${text(args.templateId)}" deployment queued in ${mode.toUpperCase()} mode.${mode !== 'enforce' ? ' Monitor before enforcing.' : ' ⚠️ Live enforcement.'}`,
     rollbackData: { ...args, action: 'deploy' },
   };
 });
 
-register('policy_create_backup', async () => {
+register('policy_create_backup', () => {
   return { success: true, data: { ts: new Date().toISOString() }, summary: `Backup created ${new Date().toLocaleString()}. Full persistence requires Supabase.` };
 });
 
-register('policy_remediate_drift', async () => {
+register('policy_remediate_drift', () => {
   return { success: true, data: null, summary: 'Run "check drift" first, then approve specific remediations.' };
 });
 
@@ -1705,25 +1724,25 @@ register('policy_switch_mode', async (args, creds) => {
   return { success: false, data: null, summary: 'Mode switch failed', error: 'missing_handler' };
 });
 
-register('policy_rollback', async (args) => {
-  return { success: true, data: args, summary: `⚠️ Rollback to backup ${args.backupId} queued. Requires Supabase backend.`, rollbackData: { ...args, action: 'rollback' } };
+register('policy_rollback', (args) => {
+  return { success: true, data: args, summary: `⚠️ Rollback to backup ${text(args.backupId)} queued. Requires Supabase backend.`, rollbackData: { ...args, action: 'rollback' } };
 });
 
 // ─── Final Stubs ─────────────────────────────────────────────────────
 
-register('graph_deploy_app', async (args) => {
-  return { success: true, data: args, summary: `App ${args.appId} → group ${args.groupId} (${args.intent ?? 'required'}). Requires Intune app assignment API.`, rollbackData: { ...args, action: 'deploy_app' } };
+register('graph_deploy_app', (args) => {
+  return { success: true, data: args, summary: `App ${text(args.appId)} → group ${text(args.groupId)} (${text(args.intent, 'required')}). Requires Intune app assignment API.`, rollbackData: { ...args, action: 'deploy_app' } };
 });
 
-register('graph_run_remediation', async (args) => {
-  return { success: true, data: args, summary: `Remediation ${args.scriptId} queued${args.groupId ? ` for group ${args.groupId}` : ''}. Requires Intune remediation API.` };
+register('graph_run_remediation', (args) => {
+  return { success: true, data: args, summary: `Remediation ${text(args.scriptId)} queued${args.groupId ? ` for group ${text(args.groupId)}` : ''}. Requires Intune remediation API.` };
 });
 
-register('exchange_purge_quarantine', async (args) => {
+register('exchange_purge_quarantine', (args) => {
   return { success: true, data: args, summary: `⚠️ Quarantine purge queued. Requires Exchange PowerShell.` };
 });
 
-register('graph_get_mail_tips', async (args) => {
+register('graph_get_mail_tips', (args) => {
   const emails = args.emailAddresses as string[];
   return { success: true, data: { emails }, summary: `Mail tips for ${emails.length} address(es). Requires delegated auth.` };
 });

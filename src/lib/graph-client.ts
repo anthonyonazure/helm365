@@ -4,6 +4,8 @@
  * In production, routes through Supabase Edge Functions.
  */
 
+import { parseJson, pickNumber, pickString } from './json';
+
 const isDev = typeof window !== 'undefined' && window.location?.hostname === 'localhost';
 
 // In dev: proxy through Vite. In prod: direct (via Edge Function).
@@ -52,19 +54,25 @@ export async function getAccessToken(creds: GraphCredentials): Promise<string> {
     const err = await res.text();
     let errorMessage = `Token acquisition failed (${res.status})`;
     try {
-      const errorJson = JSON.parse(err);
-      errorMessage = errorJson.error_description ?? errorJson.error ?? errorMessage;
+      const errorJson = parseJson(err);
+      errorMessage =
+        pickString(errorJson, 'error_description') ?? pickString(errorJson, 'error') ?? errorMessage;
     } catch {
       errorMessage = err || errorMessage;
     }
     throw new Error(errorMessage);
   }
 
-  const data = await res.json();
+  const data: unknown = await res.json();
+
+  const accessToken = pickString(data, 'access_token');
+  if (!accessToken) {
+    throw new Error('Token endpoint returned no access_token');
+  }
 
   const token: GraphToken = {
-    accessToken: data.access_token,
-    expiresAt: Date.now() + (data.expires_in ?? 3600) * 1000,
+    accessToken,
+    expiresAt: Date.now() + (pickNumber(data, 'expires_in') ?? 3600) * 1000,
   };
 
   tokenCache.set(cacheKey, token);
@@ -123,8 +131,7 @@ export async function graphFetch(
       const errorText = await res.text();
       let errorMessage = `Graph API error ${res.status}`;
       try {
-        const errorJson = JSON.parse(errorText);
-        errorMessage = errorJson.error?.message ?? errorMessage;
+        errorMessage = pickString(parseJson(errorText), 'error', 'message') ?? errorMessage;
       } catch {
         errorMessage = errorText || errorMessage;
       }
@@ -135,7 +142,7 @@ export async function graphFetch(
       return { ok: true, status: 204, data: null };
     }
 
-    const data = await res.json();
+    const data: unknown = await res.json();
     return { ok: true, status: res.status, data };
   }
 

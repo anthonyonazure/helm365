@@ -82,7 +82,9 @@ export const useHelmStore = create<HelmState>()(
         const configs = await dbGetProviderConfigs(teamId);
         const keys: Partial<Record<ProviderId, string>> = {};
         for (const c of configs) {
-          keys[c.provider as ProviderId] = c.api_key_ref;
+          // api_key_ref is nullable — a provider row can exist with no key yet,
+          // and storing null would look like "configured" to the callers.
+          if (c.api_key_ref) keys[c.provider as ProviderId] = c.api_key_ref;
         }
 
         const active = await dbGetActiveProvider(teamId);
