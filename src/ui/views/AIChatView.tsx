@@ -199,13 +199,13 @@ export function AIChatView() {
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSubmit(); } }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void handleSubmit(); } }}
             placeholder="Reset MFA for Sarah, check compliance, investigate Tom's account..."
             className="flex-1 bg-transparent text-sm focus:outline-none placeholder:text-muted-foreground"
             disabled={isProcessing}
           />
           <button
-            onClick={handleSubmit}
+            onClick={() => void handleSubmit()}
             disabled={!input.trim() || isProcessing}
             className="p-1 text-muted-foreground hover:text-foreground disabled:opacity-50"
           >

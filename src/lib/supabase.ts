@@ -1,9 +1,14 @@
 import { createClient } from '@supabase/supabase-js';
+import type { Database } from './database.types';
 
+// import.meta.env is `any` unless the variables are declared (see vite-env.d.ts),
+// so read them through the declared interface rather than off the raw record.
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL ?? 'http://localhost:54321';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY ?? '';
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// The Database generic is what makes every .from()/.select() call typed instead
+// of `any`; without it the untyped rows leak into the stores and the views.
+export const supabase = createClient<Database>(supabaseUrl, supabaseAnonKey);
 
 /**
  * Get the current authenticated user's ID.

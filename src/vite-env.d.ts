@@ -1,5 +1,17 @@
 /// <reference types="vite/client" />
 
+// Declaring the env vars this app reads turns `import.meta.env.VITE_*` from
+// `any` into `string | undefined`, so a missing variable is a type error at the
+// call site rather than an untyped value that spreads through the client.
+interface ImportMetaEnv {
+  readonly VITE_SUPABASE_URL?: string;
+  readonly VITE_SUPABASE_ANON_KEY?: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}
+
 interface SpeechRecognition extends EventTarget {
   continuous: boolean;
   interimResults: boolean;

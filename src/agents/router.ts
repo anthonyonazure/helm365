@@ -1,5 +1,6 @@
 import type { AgentType } from '@/types/agents';
 import type { AIProvider, Message } from '@/types/providers';
+import { parseJson, pickArray, pickNumber, pickString } from '@/lib/json';
 import type { ParsedIntent } from './types';
 
 /**
@@ -32,6 +33,21 @@ Respond with ONLY a JSON object:
     "action": "<action verb>"
   }
 }`;
+
+const AGENT_TYPES = [
+  'exchange',
+  'identity',
+  'device',
+  'compliance',
+  'security',
+  'licensing',
+  'reporting',
+  'policy',
+] as const satisfies readonly AgentType[];
+
+function isAgentType(value: string): value is AgentType {
+  return (AGENT_TYPES as readonly string[]).includes(value);
+}
 
 // Keyword-based fallback routing (no AI needed)
 const KEYWORD_MAP: Record<string, AgentType> = {
@@ -127,17 +143,26 @@ export async function routeByAI(input: string, provider: AIProvider, model?: str
 
   try {
     const response = await provider.chat(messages, [], model);
-    const parsed = JSON.parse(response.content);
+    const parsed = parseJson(response.content);
+
+    // The model is asked for JSON but is free to answer with anything, so an
+    // unrecognised agent is treated as a routing failure rather than being
+    // cast through to a caller that will then look up a handler that does not
+    // exist.
+    const agent = pickString(parsed, 'agent');
+    if (!agent || !isAgentType(agent)) return routeByKeywords(input);
 
     return {
-      agent: parsed.agent as AgentType,
-      confidence: parsed.confidence ?? 0.8,
-      intent: parsed.intent ?? input,
+      agent,
+      confidence: pickNumber(parsed, 'confidence') ?? 0.8,
+      intent: pickString(parsed, 'intent') ?? input,
       entities: {
-        tenant: parsed.entities?.tenant,
-        users: parsed.entities?.users,
-        resource: parsed.entities?.resource,
-        action: parsed.entities?.action,
+        tenant: pickString(parsed, 'entities', 'tenant'),
+        users: pickArray(parsed, 'entities', 'users').filter(
+          (u): u is string => typeof u === 'string',
+        ),
+        resource: pickString(parsed, 'entities', 'resource'),
+        action: pickString(parsed, 'entities', 'action'),
       },
       rawInput: input,
     };

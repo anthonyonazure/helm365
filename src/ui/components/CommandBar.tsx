@@ -96,7 +96,7 @@ export function CommandBar() {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      handleSubmit();
+      void handleSubmit();
     }
   };
 
@@ -133,7 +133,7 @@ export function CommandBar() {
 
         {/* Submit */}
         <button
-          onClick={handleSubmit}
+          onClick={() => void handleSubmit()}
           disabled={!input.trim() || isProcessing}
           className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-background disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >

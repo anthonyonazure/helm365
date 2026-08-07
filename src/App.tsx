@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route } from 'react-router';
 import { AppLayout } from './ui/layout/AppLayout';
 import { DashboardView } from './ui/views/DashboardView';
 import { AIChatView } from './ui/views/AIChatView';
@@ -22,14 +22,14 @@ export default function App() {
   const loadTenants = useTenantsStore((s) => s.loadFromDb);
 
   useEffect(() => {
-    initialize();
+    void initialize();
   }, [initialize]);
 
   // Load data from Supabase when team is available
   useEffect(() => {
     if (teamId) {
-      loadProviders(teamId);
-      loadTenants(teamId);
+      void loadProviders(teamId);
+      void loadTenants(teamId);
     }
   }, [teamId, loadProviders, loadTenants]);
 

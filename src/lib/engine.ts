@@ -8,7 +8,6 @@ import { useTenantsStore } from './tenants-store';
 import type { Action } from '@/types/gateway';
 import type { AIProvider, Message, ToolDefinition } from '@/types/providers';
 import type { AgentTool } from '@/agents/types';
-import type { TeamRole } from '@/gateway/permissions';
 import type { GraphCredentials } from './graph-client';
 
 export interface CommandResult {
@@ -162,7 +161,7 @@ export async function executeCommand(input: string): Promise<CommandResult> {
       tenantDomain,
       userId: 'current-user',
       userEmail: 'admin@helm365.io',
-      userRole: 'admin' as TeamRole,
+      userRole: 'admin',
       teamId: 'default-team',
       processingMode: store.processingMode,
       aiProvider: store.activeProvider ?? 'keyword-routing',

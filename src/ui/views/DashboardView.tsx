@@ -1,7 +1,7 @@
 import { Ship, Shield, HardDrive, AlertTriangle, CheckCircle, Activity, Zap, Clock, ArrowRight } from 'lucide-react';
 import { useHelmStore } from '@/lib/store';
 import { useTenantsStore } from '@/lib/tenants-store';
-import { NavLink } from 'react-router-dom';
+import { NavLink } from 'react-router';
 
 export function DashboardView() {
   const actions = useHelmStore((s) => s.actions);
